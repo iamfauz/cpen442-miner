@@ -40,7 +40,7 @@ mod cpen442coin;
 mod miner;
 
 fn main() {
-    let tracker = cpen442coin::Tracker::new("b33df5e6d48aa36ef96896b695223ce8".into());
+    let tracker = cpen442coin::Tracker::new_verify("b33df5e6d48aa36ef96896b695223ce8".into());
 
     let mut mm = miner::MiningManager::new(tracker);
 

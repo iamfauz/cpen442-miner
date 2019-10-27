@@ -28,16 +28,6 @@ pub fn generate_prefix_block(previous_coin : &str)-> Vec<u8> {
 
     block.extend_from_slice(cpen442coin::COIN_PREFIX_STR.as_bytes());
     block.extend_from_slice(previous_coin.as_bytes());
-    block.extend_from_slice("END".as_bytes());
-    
-    assert!(block.len() < cpen442coin::MD5_BLOCK_LEN);
-
-    let remaining = cpen442coin::MD5_BLOCK_LEN - block.len();
-
-    block.extend(OsRng.sample_iter::<u8, _>(rand::distributions::Standard)
-        .take(remaining));
-
-    assert!(block.len() == cpen442coin::MD5_BLOCK_LEN);
 
     block
 }
@@ -110,11 +100,11 @@ impl MiningManager {
             }
 
             if let Ok(coin) = self.coins_rchan.recv_timeout(Duration::from_millis(25)) {
-                let prefix_block = hex::encode(coin.prefix_block);
-                let blob = hex::encode(coin.blob);
+                let blob = hex::encode(&coin.blob);
 
-                println!("Found Coin With Prefix Block: {}", prefix_block);
-                println!("Blob: {}", blob);
+                println!("Found Coin With Blob: {}", blob);
+
+                self.tracker.claim_coin(coin.blob).expect("Failed to verify Coin!");
 
                 for miner in &mut miners {
                     miner.stop().unwrap();
@@ -228,11 +218,9 @@ impl Miner {
 
                 std::mem::swap(&mut coin.blob, &mut coin_block);
 
-                let prefix_block = hex::encode(&coin.prefix_block);
                 let blob = hex::encode(&coin.blob);
 
-                println!("Found Coin With Prefix Block: {}", prefix_block);
-                println!("Blob: {}", blob);
+                println!("Found Coin With Blob: {}", blob);
 
                 match tdata.coin_schan.send(coin) {
                     Ok(_) => {},

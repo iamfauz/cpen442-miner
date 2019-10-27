@@ -78,6 +78,14 @@ impl Tracker {
         }
     }
 
+    pub fn new_verify(miner_id: String) -> Tracker {
+        let mut t = Self::new(miner_id);
+
+        t.claim_coin_url = VERIFY_EXAMPLE_COIN_URL;
+
+        t
+    }
+
     pub fn id(&self) -> &str {
         &self.miner_id
     }
