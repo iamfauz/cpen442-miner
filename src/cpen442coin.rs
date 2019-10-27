@@ -1,9 +1,7 @@
 //! Coin
 //!
-
-use hex;
+//!
 use base64;
-use openssl::hash::MessageDigest;
 use reqwest::Client;
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
@@ -12,24 +10,10 @@ use crate::Error;
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
 pub const MD5_BLOCK_LEN : usize = 512 / 8;
+#[allow(dead_code)]
 pub const MD5_HASH_LEN : usize = 128 / 8;
 
-pub struct CoinHash {
-    pub bytes : [u8; MD5_HASH_LEN]
-}
-
-impl CoinHash {
-    pub fn from_hex(hex : &str) -> Result<CoinHash, Error> {
-        let mut bytes = [0u8 ; MD5_HASH_LEN];
-        hex::decode_to_slice(hex, &mut bytes)?;
-
-        Ok(CoinHash { bytes })
-    }
-
-    pub fn as_hex(&self) -> String {
-        hex::encode(self.bytes)
-    }
-}
+pub type CoinHash = String;
 
 pub struct Tracker {
     miner_id : String,
@@ -53,6 +37,7 @@ struct ClaimCoinReq {
 #[serde(untagged)]
 enum ClaimCoinResp {
     Fail { fail: String },
+    #[allow(dead_code)]
     Success { success: String },
 }
 
@@ -78,6 +63,7 @@ impl Tracker {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_verify(miner_id: String) -> Tracker {
         let mut t = Self::new(miner_id);
 
@@ -98,7 +84,7 @@ impl Tracker {
         if code.is_success() {
             let response : LastCoinResp = response.json()?;
 
-            Ok(CoinHash::from_hex(&response.coin_id)?)
+            Ok(response.coin_id)
         } else {
             Err(Error::new(format!("Get Last Coin Failed Http {}: {}",
                         code.as_u16(), code.canonical_reason().unwrap_or(""))))
@@ -147,18 +133,14 @@ mod tests {
 
         let coin = t.get_last_coin().unwrap();
 
-        assert_eq!(coin.bytes[0], 0);
-        assert_eq!(coin.bytes[1], 0);
-        assert_eq!(coin.bytes[2], 0);
-        assert_eq!(coin.bytes[3], 0);
+        assert_eq!(&coin[0..8], "00000000");
 
-        println!("Last Coin: {}", coin.as_hex());
+        println!("Last Coin: {}", coin);
     }
 
     #[test]
     fn test_claim_coin_ok() {
-        let mut t = Tracker::new("d41f33d21c5b2c49053c2b1cc2a8cc84".into());
-        t.claim_coin_url = VERIFY_EXAMPLE_COIN_URL;
+        let t = Tracker::new_verify("d41f33d21c5b2c49053c2b1cc2a8cc84".into());
         //t.claim_coin_url = "http://localhost:55555/verify_example_coin";
 
         let coin = base64::decode("WICbUP4soPxDWXV92qR6dpP7Rhs=").unwrap();
@@ -168,8 +150,7 @@ mod tests {
 
     #[test]
     fn test_claim_coin_fail() {
-        let mut t = Tracker::new("d41f33d21c5b2c49052b1cc2a8cc84".into());
-        t.claim_coin_url = VERIFY_EXAMPLE_COIN_URL;
+        let t = Tracker::new_verify("d41f33d21c5b2c49052b1cc2a8cc84".into());
         //t.claim_coin_url = "http://localhost:55555/verify_coin";
 
         let coin = base64::decode("WICbUP4soPxDWXV92qR6dpP7Rhs=").unwrap();

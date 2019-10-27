@@ -38,11 +38,17 @@ impl From<reqwest::Error> for Error {
 
 mod cpen442coin;
 mod miner;
+mod cryptowallet;
 
 fn main() {
-    let tracker = cpen442coin::Tracker::new_verify("b33df5e6d48aa36ef96896b695223ce8".into());
+    let identity = String::from("b33df5e6d48aa36ef96896b695223ce8");
+
+    let tracker = cpen442coin::Tracker::new(identity.clone());
 
     let mut mm = miner::MiningManager::new(tracker);
 
-    mm.run(Some("2e3a8e88a060cedcd9ac7b74fadd58e0".into()));
+    let mut wallet = cryptowallet::Wallet::new("wallet.txt", identity);
+
+    //mm.run(Some("2e3a8e88a060cedcd9ac7b74fadd58e0".into()));
+    mm.run(&mut wallet);
 }
