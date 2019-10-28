@@ -241,7 +241,7 @@ impl MiningManager {
                                 let elapsed = SystemTime::now().duration_since(start_time)
                                     .unwrap().as_secs();
                                 let rate = 3600.0 * coin_count as f32 / elapsed as f32;
-                                term.write_line(&format!("Coins Mined: {}, Rate: {} Coins/Hour", coin_count, rate)).unwrap();
+                                term.write_line(&format!("Coins Mined: {}, Rate: {:.2} Coins/Hour", coin_count, rate)).unwrap();
                                 false
                             },
                             Err(_) => { true }
