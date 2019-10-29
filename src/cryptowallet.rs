@@ -1,6 +1,6 @@
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Write, Error};
 use std::path::PathBuf;
 use serde::Serialize;
 use serde_json;
@@ -19,20 +19,16 @@ pub struct Wallet {
 }
 
 impl Wallet {
-    pub fn new(filepath : PathBuf, id : String) -> Self {
+    pub fn new(filepath : PathBuf, id : String) -> Result<Self, Error> {
         let file = OpenOptions::new()
             .create(true)
             .read(false)
             .write(true)
             .truncate(false)
             .append(true)
-            .open(filepath)
-            .expect("Failed to open wallet");
+            .open(filepath)?;
 
-        Self {
-            id,
-            file
-        }
+        Ok(Self { id, file })
     }
 
     pub fn store(&mut self, blob_str : String, last_coin : String) {

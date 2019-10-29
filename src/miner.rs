@@ -142,16 +142,16 @@ impl MiningManager {
         }
     }
 
-    pub fn run(&mut self, wallet : &mut Option<Wallet>) {
+    pub fn run(&mut self, wallet : &mut Option<Wallet>) -> Result<(), Error> {
         let term = Term::stderr();
-        let mut last_coin = self.tracker.get_last_coin().expect("Cannot get last coin!");
+        let mut last_coin = self.tracker.get_last_coin()?;
         let mut last_last_coin = last_coin.clone();
         let mut coins_to_claim = VecDeque::new();
         let mut check_now = false;
         let mut claim_now = false;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(5000));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(10000));
         let mut stats_print_timer = Timer::new(Duration::from_millis(1500));
 
         let mut coin_count : u64 = 0;

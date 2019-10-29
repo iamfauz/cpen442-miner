@@ -9,7 +9,17 @@ use std::path::PathBuf;
 mod error;
 mod cpen442coin;
 mod miner;
+mod oclminer;
 mod cryptowallet;
+
+use error::Error;
+
+#[derive(Debug, StructOpt)]
+struct MinerOclOpts {
+    /// List OpenCL Devices
+    #[structopt(long = "cl-devices")]
+    cl_devices : bool,
+}
 
 #[derive(Debug, StructOpt)]
 struct MinerOpts {
@@ -19,7 +29,7 @@ struct MinerOpts {
 
     /// Miner Identity String
     #[structopt(short = "i", long)]
-    identity : String,
+    identity : Option<String>,
 
     /// MD5 the Identity String
     #[structopt(long)]
@@ -31,20 +41,32 @@ struct MinerOpts {
     
     /// File to output mined coins to
     #[structopt(short = "o", long = "output", parse(from_os_str))]
-    wallet : Option<PathBuf>
+    wallet : Option<PathBuf>,
+
+    #[structopt(flatten)]
+    ocl : MinerOclOpts,
 }
 
-fn main() {
+fn main() -> Result<(), Error> {
     let opt = MinerOpts::from_args();
+
+    if opt.ocl.cl_devices {
+        oclminer::list_cl_devices()?;
+        return Ok(());
+    }
+
+    if opt.identity.is_none() {
+        return Err(Error::Msg("Identity is not given! Specify it with --identity.".into()));
+    }
 
     let identity;
     if opt.md5identity {
         use openssl::hash;
-        let md5 = hash::hash(hash::MessageDigest::md5(), opt.identity.as_bytes())
-            .unwrap();
+        let md5 = hash::hash(hash::MessageDigest::md5(),
+            opt.identity.unwrap().as_bytes()).unwrap();
         identity = hex::encode(&md5[..]);
     } else {
-        identity = opt.identity;
+        identity = opt.identity.unwrap();
     }
 
     println!("Mining with Identity: {}", identity);
@@ -68,11 +90,13 @@ fn main() {
 
         if let Some(wallet_path) = opt.wallet {
             println!("Wallet Path: {:?}", wallet_path);
-            wallet = Some(cryptowallet::Wallet::new(wallet_path, identity.clone()));
+            wallet = Some(cryptowallet::Wallet::new(wallet_path, identity.clone())?);
         }
     }
 
     let mut mm = miner::MiningManager::new(tracker, ncpu);
 
     mm.run(&mut wallet);
+
+    Ok(())
 }

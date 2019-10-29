@@ -1,12 +1,16 @@
 use reqwest;
 use hex::FromHexError;
 use openssl::error::ErrorStack;
+use std::io;
+use ocl;
 
 #[derive(Debug)]
 pub enum Error {
     Request(reqwest::Error),
     OpenSSL(ErrorStack),
+    OpenCL(ocl::Error),
     Hex(FromHexError),
+    Io(io::Error),
     Msg(String)
 }
 
@@ -31,6 +35,18 @@ impl From<ErrorStack> for Error {
 impl From<reqwest::Error> for Error {
     fn from(e : reqwest::Error) -> Self {
         Error::Request(e)
+    }
+}
+
+impl From<ocl::Error> for Error {
+    fn from(e : ocl::Error) -> Self {
+        Error::OpenCL(e)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(e : io::Error) -> Self {
+        Error::Io(e)
     }
 }
 
