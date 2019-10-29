@@ -104,7 +104,7 @@ impl Tracker {
         if let Some(fake_coin) = &self.fake_last_coin {
             Ok(fake_coin.clone())
         } else {
-            let mut response = self.client.get(self.last_coin_url).json("hello").send()?;
+            let mut response = self.client.post(self.last_coin_url).send()?;
 
             let code = response.status();
 
