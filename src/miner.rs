@@ -9,9 +9,9 @@ use console::Term;
 use std::time::{Duration, Instant, SystemTime};
 use std::thread;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     mpsc,
-    Arc
+    Arc,
+    Mutex,
 };
 
 const MINER_MAX_BLOCKS : usize = 8;
@@ -92,19 +92,15 @@ impl MiningManager {
         self.miners[last].run();
     }
 
-    fn stop_all_miners(&mut self) {
-        while let Some(mut miner) = self.miners.pop_front() {
+    fn stop_one_miner(&mut self) {
+        if let Some(mut miner) = self.miners.pop_front() {
             miner.stop().unwrap_or_else(|e| eprintln!("Miner Join Err: {:?}", e));
         }
     }
 
-    fn stop_some_miners(&mut self, n : usize) {
-        for _ in 0..n {
-            if let Some(mut miner) = self.miners.pop_front() {
-                miner.stop().unwrap_or_else(|e| eprintln!("Miner Join Err: {:?}", e));
-            } else {
-                break;
-            }
+    fn update_miners(&self, coin : &String) {
+        for miner in &self.miners {
+            miner.update_prev_coin(coin.clone());
         }
     }
 
@@ -151,8 +147,9 @@ impl MiningManager {
         let mut claim_now = false;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(10000));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(4000));
         let mut stats_print_timer = Timer::new(Duration::from_millis(1500));
+        let mut stop_miner_timer = Timer::new(Duration::from_secs(64));
 
         let mut coin_count : u64 = 0;
         let mut mine_count : u64 = 0;
@@ -209,13 +206,11 @@ impl MiningManager {
                             last_last_coin = last_coin;
                             last_coin = coin;
                             term.write_line(&format!("\nCoin has changed to: {}", last_coin)).unwrap();
-
-                            self.stop_all_miners();
                         } else if coin != last_coin && coin == last_last_coin {
                             std::mem::swap(&mut last_coin, &mut last_last_coin);
-
-                            self.stop_some_miners(self.nproducers / 2);
                         }
+
+                        self.update_miners(&last_coin);
                     },
                     Err(e) => {
                         term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
@@ -262,22 +257,33 @@ impl MiningManager {
                 claim_now = false;
             }
 
+            if stop_miner_timer.check_and_reset() {
+                self.stop_one_miner();
+            }
+
             self.prune_stopped_miners();
         }
     }
 }
 
 
+/// Data taken into the thread
 struct MinerThreadData {
     stats_schan : mpsc::Sender<Stats>,
     coin_schan : mpsc::SyncSender<Coin>,
-    previous_coin : String,
     miner_id : String,
+}
+
+/// Data shared with the thread
+/// managed by a mutex
+struct MinerSharedData {
+    previous_coin : Option<String>,
+    should_stop : bool,
 }
 
 pub struct Miner {
     tdata : Option<MinerThreadData>,
-    should_stop : Arc<AtomicBool>,
+    tsdata : Arc<Mutex<MinerSharedData>>,
     thread : Option<thread::JoinHandle<Result<(), Error>>>
 }
 
@@ -286,20 +292,20 @@ impl Miner {
         coin_schan : mpsc::SyncSender<Coin>,
         previous_coin : &str,
         miner_id : &str) -> Self {
-        let should_stop = Arc::new(AtomicBool::new(false));
-        let previous_coin = String::from(previous_coin);
-        let miner_id = String::from(miner_id);
-
-        let tdata = MinerThreadData {
+        let tdata = Some(MinerThreadData {
             stats_schan,
             coin_schan,
-            previous_coin,
-            miner_id,
-        };
+            miner_id : String::from(miner_id),
+        });
+
+        let tsdata = Arc::from(Mutex::from(MinerSharedData {
+            previous_coin : Some(String::from(previous_coin)),
+            should_stop : false,
+        }));
 
         Miner {
-            should_stop,
-            tdata : Some(tdata),
+            tdata,
+            tsdata,
             thread : None
         }
     }
@@ -308,28 +314,33 @@ impl Miner {
         assert!(self.tdata.is_some());
         let tdata = self.tdata.take().unwrap();
 
-        let should_stop = self.should_stop.clone();
+        let tsdata = self.tsdata.clone();
 
         self.thread = Some(thread::spawn(move || -> Result<(), Error> {
-            match Miner::mine(&tdata, &should_stop) {
+            let mut tsdata = tsdata;
+            match Miner::mine(&tdata, &mut tsdata) {
                 Ok(_) => {
-                    should_stop.store(true, Ordering::Relaxed);
+                    tsdata.lock().unwrap().should_stop = true;
                     Ok(())
                 },
                 Err(e) => {
-                    should_stop.store(true, Ordering::Relaxed);
+                    tsdata.lock().unwrap().should_stop = true;
                     Err(e)
                 }
             }
         }));
     }
 
+    fn update_prev_coin(&self, coin : String) {
+        self.tsdata.lock().unwrap().previous_coin = Some(coin);
+    }
+
     fn is_stopped(&self) -> bool {
-        self.should_stop.load(Ordering::Relaxed)
+        self.tsdata.lock().unwrap().should_stop
     }
 
     fn stop(&mut self) -> Result<(), Error> {
-        self.should_stop.store(true, Ordering::Relaxed);
+        self.tsdata.lock().unwrap().should_stop = true;
         if let Some(thread) = self.thread.take() {
             Ok(thread.join().unwrap()?)
         } else {
@@ -337,7 +348,7 @@ impl Miner {
         }
     }
 
-    fn mine(tdata : &MinerThreadData, should_stop : &Arc<AtomicBool>) -> Result<(), Error> {
+    fn mine(tdata : &MinerThreadData, tsdata: &mut Arc<Mutex<MinerSharedData>>) -> Result<(), Error> {
         use rand::distributions;
         use cpen442coin::{COIN_PREFIX_STR, MD5_BLOCK_LEN};
         use arrayvec::ArrayVec;
@@ -346,20 +357,40 @@ impl Miner {
         let dist = distributions::Uniform::from(0..=255);
         let mut hasher = Hasher::new(MessageDigest::md5())?;
 
-        let mut prefix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
-        prefix_bytes.try_extend_from_slice(COIN_PREFIX_STR.as_bytes()).unwrap();
-        prefix_bytes.try_extend_from_slice(&tdata.previous_coin.as_bytes()).unwrap();
+        let mut previous_coin;
 
-        let mut coin_block : ArrayVec<[u8; MD5_BLOCK_LEN * MINER_MAX_BLOCKS]> = ArrayVec::new();
+        {
+            previous_coin = tsdata.lock().unwrap().previous_coin.clone().unwrap();
+        }
 
         let mut suffix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
         suffix_bytes.try_extend_from_slice(&tdata.miner_id.as_bytes()).unwrap();
+
+        let mut coin_block : ArrayVec<[u8; MD5_BLOCK_LEN * MINER_MAX_BLOCKS]> = ArrayVec::new();
+
+        let mut prefix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
+        prefix_bytes.try_extend_from_slice(COIN_PREFIX_STR.as_bytes()).unwrap();
+        prefix_bytes.try_extend_from_slice(previous_coin.as_bytes()).unwrap();
 
         let start = Instant::now();
         let mut last_report_timer = Timer::new(Duration::from_millis(1000));
         let mut counter = 0;
 
-        while ! should_stop.load(Ordering::Relaxed) {
+        loop {
+            {
+                let mut tsdata = tsdata.lock().unwrap();
+
+                if tsdata.previous_coin.is_some() {
+                    previous_coin = tsdata.previous_coin.take().unwrap();
+                    unsafe { prefix_bytes.set_len(COIN_PREFIX_STR.len()); }
+                    prefix_bytes.try_extend_from_slice(previous_coin.as_bytes()).unwrap();
+                }
+
+                if tsdata.should_stop {
+                    break;
+                }
+            }
+
             coin_block.clear();
             // Add timestamp
             coin_block.try_extend_from_slice(&start.elapsed().as_nanos().to_ne_bytes()[..]).unwrap();
@@ -377,7 +408,7 @@ impl Miner {
                 prefix_bytes.len() - coin_block.len() - suffix_bytes.len();
             coin_block.extend(rng.sample_iter(dist).take(sample_len));
 
-            for x in 0..128 {
+            for x in 0..=255 {
                 for cb_idx in 0..coin_block.len() {
                     hasher.update(&prefix_bytes).unwrap();
                     hasher.update(&coin_block).unwrap();
@@ -386,7 +417,7 @@ impl Miner {
 
                     if h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 0 {
                         let coin = Coin {
-                            previous_coin : tdata.previous_coin.clone(),
+                            previous_coin,
                             blob : Vec::from(&coin_block[..])
                         };
 

@@ -96,7 +96,7 @@ fn main() -> Result<(), Error> {
 
     let mut mm = miner::MiningManager::new(tracker, ncpu);
 
-    mm.run(&mut wallet);
+    mm.run(&mut wallet)?;
 
     Ok(())
 }
