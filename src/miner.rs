@@ -150,6 +150,7 @@ impl MiningManager {
         let mut coin_check_timer = Timer::new(Duration::from_millis(4000));
         let mut stats_print_timer = Timer::new(Duration::from_millis(1500));
         let mut stop_miner_timer = Timer::new(Duration::from_secs(64));
+        let mut too_many_req_timer = Timer::new(Duration::from_secs(30));
 
         let mut coin_count : u64 = 0;
         let mut mine_count : u64 = 0;
@@ -213,7 +214,9 @@ impl MiningManager {
                         self.update_miners(&last_coin);
                     },
                     Err(e) => {
-                        term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
+                        if too_many_req_timer.check_and_reset() {
+                            term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
+                        }
                     }
                 };
 
