@@ -2,7 +2,7 @@
 use hex;
 use base64;
 use std::collections::VecDeque;
-use crate::{Error, cpen442coin, cryptowallet::Wallet};
+use crate::{error::Error, cpen442coin, cryptowallet::Wallet};
 use rand::{Rng, RngCore};
 use openssl::hash::{Hasher, MessageDigest};
 use console::Term;
@@ -13,7 +13,6 @@ use std::sync::{
     mpsc,
     Arc
 };
-use num_cpus;
 
 const MINER_MAX_BLOCKS : usize = 8;
 
@@ -65,8 +64,8 @@ impl Timer {
 }
 
 impl MiningManager {
-    pub fn new(tracker : cpen442coin::Tracker) -> Self {
-        let nproducers = num_cpus::get();
+    pub fn new(tracker : cpen442coin::Tracker, ncpu : usize) -> Self {
+        let nproducers = ncpu;
         let (stats_schan, stats_rchan) = mpsc::channel();
         let (coins_schan, coins_rchan) = mpsc::sync_channel(nproducers);
         let miners = VecDeque::new();
@@ -119,9 +118,7 @@ impl MiningManager {
         }
     }
 
-    fn claim_coin(&self, term: &Term, wallet : &mut Wallet, coin : &Coin) -> Result<(), ()> {
-        let blob = base64::encode(&coin.blob);
-
+    fn claim_coin(&mut self, term: &Term, coin : &Coin) -> Result<(), ()> {
         let mut hasher = Hasher::new(MessageDigest::md5()).unwrap();
         hasher.update(cpen442coin::COIN_PREFIX_STR.as_bytes()).unwrap();
         hasher.update(coin.previous_coin.as_bytes()).unwrap();
@@ -136,7 +133,6 @@ impl MiningManager {
         match self.tracker.claim_coin(coin.blob.clone()) {
             Ok(_) => {
                 term.write_line("Coin successfully claimed!").unwrap();
-                wallet.store(blob, coin.previous_coin.clone());
                 Ok(())
             },
             Err(e) => {
@@ -146,7 +142,7 @@ impl MiningManager {
         }
     }
 
-    pub fn run(&mut self, wallet : &mut Wallet) {
+    pub fn run(&mut self, wallet : &mut Option<Wallet>) {
         let term = Term::stderr();
         let mut last_coin = self.tracker.get_last_coin().expect("Cannot get last coin!");
         let mut last_last_coin = last_coin.clone();
@@ -234,9 +230,15 @@ impl MiningManager {
             if claim_now {
                 coins_to_claim.retain(|coin| {
                     if last_coin == coin.previous_coin {
-                        check_now = true;
-                        match self.claim_coin(&term, wallet, coin) {
+                        match self.claim_coin(&term, coin) {
                             Ok(_) => {
+                                // Record the coin
+                                if let Some(wallet) = wallet {
+                                    let blob = base64::encode(&coin.blob);
+                                    wallet.store(blob, coin.previous_coin.clone());
+                                }
+
+                                check_now = true;
                                 coin_count += 1;
                                 let elapsed = SystemTime::now().duration_since(start_time)
                                     .unwrap().as_secs();
@@ -343,7 +345,6 @@ impl Miner {
         let mut rng = rand::thread_rng();
         let dist = distributions::Uniform::from(0..=255);
         let mut hasher = Hasher::new(MessageDigest::md5())?;
-        let mut counter = 0;
 
         let mut prefix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
         prefix_bytes.try_extend_from_slice(COIN_PREFIX_STR.as_bytes()).unwrap();
@@ -355,6 +356,8 @@ impl Miner {
         suffix_bytes.try_extend_from_slice(&tdata.miner_id.as_bytes()).unwrap();
 
         let start = Instant::now();
+        let mut last_report_timer = Timer::new(Duration::from_millis(1000));
+        let mut counter = 0;
 
         while ! should_stop.load(Ordering::Relaxed) {
             coin_block.clear();
@@ -399,13 +402,16 @@ impl Miner {
                     coin_block[cb_idx] += x;
 
                     counter += 1;
-
-                    if counter % 1048576 == 0 {
-                        tdata.stats_schan.send(Stats{ nhash: 1048576 }).unwrap();
-                    }
                 }
             }
+
+            if last_report_timer.check_and_reset() {
+                tdata.stats_schan.send(Stats{ nhash: counter }).unwrap();
+                counter = 0;
+            }
         }
+
+        tdata.stats_schan.send(Stats{ nhash: counter }).unwrap();
 
         Ok(())
     }
