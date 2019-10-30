@@ -8,6 +8,7 @@ use crate::{
     cryptowallet::Wallet,
     util::Timer,
     cpuminer::{CpuMiner, CpuMinerFunction},
+    oclminer::{OclMiner, OclMinerFunction}
 };
 use openssl::hash::{Hasher, MessageDigest};
 use console::Term;
@@ -21,7 +22,8 @@ use std::sync::{
 };
 
 pub struct Stats {
-    pub nhash : u64
+    pub nhash : u64,
+    pub loopms : Option<u64>,
 }
 
 pub struct Coin {
@@ -36,15 +38,22 @@ pub struct MiningManager {
     coins_rchan : mpsc::Receiver<Coin>,
     coins_schan : mpsc::SyncSender<Coin>,
     nproducers : usize,
-    miners : VecDeque<CpuMiner>
+    noclproducers : usize,
+    miners : VecDeque<CpuMiner>,
+    oclminers : VecDeque<OclMiner>,
+    oclminerf : Option<OclMinerFunction>,
 }
 
 impl MiningManager {
-    pub fn new(tracker : cpen442coin::Tracker, ncpu : usize) -> Self {
+    pub fn new(tracker : cpen442coin::Tracker,
+        ncpu : usize, nocl : usize,
+        oclf : Option<OclMinerFunction>) -> Self {
         let nproducers = ncpu;
+        let noclproducers = nocl;
         let (stats_schan, stats_rchan) = mpsc::channel();
         let (coins_schan, coins_rchan) = mpsc::sync_channel(nproducers);
         let miners = VecDeque::new();
+        let oclminers = VecDeque::new();
 
         MiningManager {
             tracker,
@@ -53,7 +62,10 @@ impl MiningManager {
             coins_rchan,
             coins_schan,
             nproducers,
-            miners
+            noclproducers,
+            miners,
+            oclminerf: oclf,
+            oclminers,
         }
     }
 
@@ -74,14 +86,41 @@ impl MiningManager {
         self.miners[last].run();
     }
 
+    fn start_ocl_miner(&mut self, last_coin : &str) {
+        if let Some(oclminerf) = &self.oclminerf {
+            let miner = Miner::new(
+                oclminerf.clone(),
+                MinerParams {
+                    stats_schan : self.stats_schan.clone(),
+                    coin_schan : self.coins_schan.clone(),
+                    previous_coin : String::from(last_coin),
+                    miner_id : String::from(self.tracker.id())
+                });
+
+            self.oclminers.push_back(miner);
+
+            let last = self.oclminers.len() - 1;
+
+            self.oclminers[last].run();
+        }
+    }
+
     fn stop_one_miner(&mut self) {
         if let Some(mut miner) = self.miners.pop_front() {
+            miner.stop().unwrap_or_else(|e| eprintln!("Miner Join Err: {:?}", e));
+        }
+
+        if let Some(mut miner) = self.oclminers.pop_front() {
             miner.stop().unwrap_or_else(|e| eprintln!("Miner Join Err: {:?}", e));
         }
     }
 
     fn update_miners(&self, coin : &String) {
         for miner in &self.miners {
+            miner.update_prev_coin(coin.clone());
+        }
+
+        for miner in &self.oclminers {
             miner.update_prev_coin(coin.clone());
         }
     }
@@ -91,6 +130,14 @@ impl MiningManager {
             if self.miners[i].is_stopped() {
                 self.miners[i].stop().unwrap();
                 self.miners.remove(i).unwrap();
+                break;
+            }
+        }
+
+        for i in 0..self.oclminers.len() {
+            if self.oclminers[i].is_stopped() {
+                self.oclminers[i].stop().unwrap();
+                self.oclminers.remove(i).unwrap();
                 break;
             }
         }
@@ -142,6 +189,10 @@ impl MiningManager {
         loop {
             if self.miners.len() < self.nproducers {
                 self.start_new_miner(&last_coin);
+            }
+
+            if self.oclminers.len() < self.noclproducers {
+                self.start_ocl_miner(&last_coin);
             }
 
             if let Ok(stat) = self.stats_rchan.recv_timeout(Duration::from_millis(10)) {
@@ -310,7 +361,7 @@ impl<T: MinerFunction + Sized + Send + 'static> Miner<T>
         self.thread = Some(thread::spawn(move || -> Result<(), Error> {
             let miner_func = miner_func;
             let tdata = tdata;
-            let mut tsdata = tsdata;
+            let tsdata = tsdata;
             match miner_func.run(tdata, tsdata.clone()) {
                 Ok(_) => {
                     tsdata.should_stop.store(true, Ordering::Relaxed);

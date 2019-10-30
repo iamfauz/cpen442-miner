@@ -134,6 +134,16 @@ static inline void md5_round(uint* internal_state, const uint* message) {
 //#define N_PARALLEL 1024
 //#endif // N_PARALLEL
 
+// Number of loops to do
+#ifndef N_LOOPS
+#define N_LOOPS 4096
+#endif
+
+// Check endianess as this program is only good for little endian
+#ifndef __LITTLE_ENDIAN__
+#error ENDIANESS
+#endif
+
 /**
  * Parallel MD5 hash kernel
  *
@@ -153,37 +163,71 @@ __kernel void md5(
     __constant uint* base_message,
     // An array indexed by the processor's ID to place
     // the first 32 bits of the md5 hash
-    __global uint* md5_prefix_out) {
+    __global uint* md5_prefix_out,
+    __global uint* message_out) {
   uint i;
+  uint j;
   const uint id = get_global_id(0);
   uint message[MESSAGE_LEN];
+  uint zero_pad[16];
+
+  // Set most significant bit of first pad byte
+  zero_pad[0] = 0x80;
+  // Fill with zeroes
+  for (i = 1; i < 14; ++i) {
+    zero_pad[i] = 0;
+  }
+  // 8 byte integer with the length of the message in bits
+  zero_pad[14] = MESSAGE_LEN * 32;
+  zero_pad[15] = 0;
 
   // Copy message locally (Probably quite slow)
   for (i = 0; i < MESSAGE_LEN; ++i) {
     message[i] = base_message[i];
   }
 
-  // Modify the message based on our ID
-  message[BLOB_INDEX + id % BLOB_LEN] += id;
-  // Assume global id is less than 16 bits (65536)
-  message[BLOB_INDEX + (id + BLOB_LEN / 4) % BLOB_LEN] ^= (id << 16) | id;
+  uint orig0 = message[BLOB_INDEX + id % BLOB_LEN];
+  uint orig1 = message[BLOB_INDEX + (id + BLOB_LEN / 4) % BLOB_LEN];
+  uint orig2 = message[BLOB_INDEX + BLOB_LEN];
 
-  // Initialize MD5
-  uint md5_state[4] = {
-    0x67452301,
-    0xefcdab89,
-    0x98badcfe,
-    0x10325476,
-  };
+  uint md5_state[4];
 
-  // Perform MD5
-  for (i = 0;  i < MESSAGE_LEN; ++i) {
-    md5_round(md5_state, message);
+
+  for (i = 0; i < N_LOOPS; ++i) {
+    // Initialize MD5
+    md5_state[0] = 0x67452301;
+    md5_state[1] = 0xefcdab89;
+    md5_state[2] = 0x98badcfe;
+    md5_state[3] = 0x10325476;
+
+    // Modify the message per iteration based on ID
+    message[BLOB_INDEX + id % BLOB_LEN] = orig0 + id + i;
+    message[BLOB_INDEX + (id + BLOB_LEN / 4) % BLOB_LEN] = orig1 ^ ((id << 16) | id);
+    message[BLOB_INDEX + BLOB_LEN] = orig2 + (id << 16) + i;
+
+    // Perform MD5
+    for (j = 0; j < MESSAGE_LEN / 16; ++j) {
+      md5_round(md5_state, &message[j * 16]);
+    }
+
+    md5_round(md5_state, zero_pad);
+
+    // Note skip the padding algorithm since the
+    // message is already a multiple of the block size
+
+    // Output our prefix
+    if (md5_state[0] == 0 && md5_prefix_out[0] == 0xFFFFFFFF) {
+      md5_prefix_out[0] = id;
+      md5_prefix_out[1] = i;
+      md5_prefix_out[2] = md5_state[0];
+      md5_prefix_out[3] = md5_state[1];
+      md5_prefix_out[4] = md5_state[2];
+      md5_prefix_out[5] = md5_state[3];
+
+      for (j = 0; j < MESSAGE_LEN; ++j) {
+	message_out[j] = message[j];
+      }
+      break;
+    }
   }
-
-  // Note skip the padding algorithm since the
-  // message is already a multiple of the block size
-
-  // Output our prefix
-  md5_prefix_out[id] = md5_state[0];
 }

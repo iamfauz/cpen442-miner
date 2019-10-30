@@ -5,7 +5,6 @@ use crate::{
     util::Timer
 };
 use rand::{Rng, RngCore};
-use rand::distributions;
 use arrayvec::ArrayVec;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
@@ -26,13 +25,13 @@ impl CpuMinerFunction {
 impl MinerFunction for CpuMinerFunction {
     fn run(self, tdata : MinerThreadData, tsdata: Arc<MinerSharedData>) -> Result<(), Error> {
         let mut rng = rand::thread_rng();
-        let dist = distributions::Uniform::from(0..=255);
+        let dist = rand::distributions::Uniform::from(0..=255);
         let mut hasher = Hasher::new(MessageDigest::md5())?;
 
         let mut previous_coin = tsdata.previous_coin.take(Ordering::Relaxed).unwrap();
 
         let mut suffix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
-        suffix_bytes.try_extend_from_slice(&tdata.miner_id.as_bytes()).unwrap();
+        suffix_bytes.try_extend_from_slice(tdata.miner_id.as_bytes()).unwrap();
 
         let mut coin_block : ArrayVec<[u8; MD5_BLOCK_LEN * MINER_MAX_BLOCKS]> = ArrayVec::new();
 
@@ -44,15 +43,11 @@ impl MinerFunction for CpuMinerFunction {
         let mut last_report_timer = Timer::new(Duration::from_millis(2000));
         let mut counter = 0;
 
-        loop {
+        while ! tsdata.should_stop.load(Ordering::Relaxed) {
             if let Some(new_coin) = tsdata.previous_coin.take(Ordering::Relaxed) {
                 previous_coin = new_coin;
                 unsafe { prefix_bytes.set_len(COIN_PREFIX_STR.len()); }
                 prefix_bytes.try_extend_from_slice(previous_coin.as_bytes()).unwrap();
-            }
-
-            if tsdata.should_stop.load(Ordering::Relaxed) {
-                break;
             }
 
             coin_block.clear();
@@ -101,12 +96,18 @@ impl MinerFunction for CpuMinerFunction {
             }
 
             if last_report_timer.check_and_reset() {
-                tdata.stats_schan.send(Stats{ nhash: counter }).unwrap();
+                tdata.stats_schan.send(Stats{
+                    nhash: counter,
+                    loopms : None,
+                }).unwrap();
                 counter = 0;
             }
         }
 
-        tdata.stats_schan.send(Stats{ nhash: counter }).unwrap();
+        tdata.stats_schan.send(Stats{
+            nhash: counter,
+            loopms : None,
+        }).unwrap();
 
         Ok(())
     }

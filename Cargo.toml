@@ -7,11 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [profile.release]
 opt-level = 3
-lto = true
+#lto = true
 
 
 [dependencies]
 ocl = "0.19"
+ocl-extras = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 openssl = "0.10.25"
 reqwest = { version = "0.9.22" }
@@ -26,3 +27,4 @@ serde_json = "1.0"
 chrono = "0.4"
 console = "0.9"
 atomic-option = "0.1"
+slice-of-array = "0.2"

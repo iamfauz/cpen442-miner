@@ -133,7 +133,13 @@ impl Tracker {
                 self.fake_last_coin = Some(h_hex);
                 Ok(())
             } else {
-                Err(Error::new(format!("Invalid Coin Hash: {}", h_hex)))
+                let mut msg = Vec::new();
+                msg.extend_from_slice(COIN_PREFIX_STR.as_bytes());
+                msg.extend_from_slice(fake_coin.as_bytes());
+                msg.extend_from_slice(&blob);
+                msg.extend_from_slice(self.miner_id.as_bytes());
+                Err(Error::new(format!("Invalid Coin Hash: {} Coin: {}",
+                            h_hex, hex::encode(msg))))
             }
         } else {
             let req = ClaimCoinReq {

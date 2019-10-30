@@ -21,6 +21,14 @@ struct MinerOclOpts {
     /// List OpenCL Devices
     #[structopt(long = "cl-devices")]
     cl_devices : bool,
+
+    /// Number of threads to feed OpenCL
+    #[structopt(long = "cl-threads")]
+    cl_threads : Option<usize>,
+
+    /// Enable OpenCL
+    #[structopt(long = "cl")]
+    cl : bool,
 }
 
 #[derive(Debug, StructOpt)]
@@ -73,12 +81,7 @@ fn main() -> Result<(), Error> {
 
     println!("Mining with Identity: {}", identity);
 
-    let ncpu;
-    if let Some(n) = opt.ncpu {
-        ncpu = n;
-    } else {
-        ncpu = num_cpus::get();
-    }
+    let ncpu = opt.ncpu.unwrap_or(num_cpus::get());
 
     println!("Using {} cpu cores to mine", ncpu);
 
@@ -96,7 +99,17 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    let mut mm = miner::MiningManager::new(tracker, ncpu);
+    let mut oclf = None;
+    let clthreads = opt.ocl.cl_threads.unwrap_or(4);
+    if opt.ocl.cl {
+        oclf = Some(oclminer::OclMinerFunction::default()?);
+        println!("Using OpenCL Device:");
+        oclminer::print_device(&oclf.as_ref().unwrap().device)?;
+
+        println!("Using {} threads for OpenCL", clthreads);
+    }
+
+    let mut mm = miner::MiningManager::new(tracker, ncpu, clthreads, oclf);
 
     mm.run(&mut wallet)?;
 
