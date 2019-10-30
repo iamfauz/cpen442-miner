@@ -2,27 +2,31 @@
 use hex;
 use base64;
 use std::collections::VecDeque;
-use crate::{error::Error, cpen442coin, cryptowallet::Wallet};
-use rand::{Rng, RngCore};
+use crate::{
+    error::Error,
+    cpen442coin,
+    cryptowallet::Wallet,
+    util::Timer,
+    cpuminer::{CpuMiner, CpuMinerFunction},
+};
 use openssl::hash::{Hasher, MessageDigest};
 use console::Term;
-use std::time::{Duration, Instant, SystemTime};
+use atomic_option::AtomicOption;
+use std::time::{Duration, SystemTime};
 use std::thread;
 use std::sync::{
+    atomic::{AtomicBool,Ordering},
     mpsc,
     Arc,
-    Mutex,
 };
 
-const MINER_MAX_BLOCKS : usize = 8;
-
-struct Stats {
-    nhash : u64
+pub struct Stats {
+    pub nhash : u64
 }
 
 pub struct Coin {
-    previous_coin : String,
-    blob : Vec<u8>
+    pub previous_coin : String,
+    pub blob : Vec<u8>
 }
 
 pub struct MiningManager {
@@ -32,35 +36,7 @@ pub struct MiningManager {
     coins_rchan : mpsc::Receiver<Coin>,
     coins_schan : mpsc::SyncSender<Coin>,
     nproducers : usize,
-    miners : VecDeque<Miner>
-}
-
-struct Timer {
-    start : Instant,
-    period : Duration
-}
-
-impl Timer {
-    fn new(period : Duration) -> Self {
-        Timer {
-            start : Instant::now(),
-            period
-        }
-    }
-
-    fn check_and_reset(&mut self) -> bool {
-        if self.start.elapsed() > self.period {
-            let rem = self.start.elapsed() - self.period;
-            self.start = Instant::now() - rem;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn reset(&mut self) {
-        self.start = Instant::now();
-    }
+    miners : VecDeque<CpuMiner>
 }
 
 impl MiningManager {
@@ -82,8 +58,14 @@ impl MiningManager {
     }
 
     fn start_new_miner(&mut self, last_coin : &str) {
-        let miner = Miner::new(self.stats_schan.clone(), self.coins_schan.clone(),
-        &last_coin, self.tracker.id());
+        let miner = Miner::new(
+            CpuMinerFunction::new(),
+            MinerParams {
+            stats_schan : self.stats_schan.clone(),
+            coin_schan : self.coins_schan.clone(),
+            previous_coin : String::from(last_coin),
+            miner_id : String::from(self.tracker.id())
+        });
 
         self.miners.push_back(miner);
 
@@ -147,8 +129,8 @@ impl MiningManager {
         let mut claim_now = false;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(4000));
-        let mut stats_print_timer = Timer::new(Duration::from_millis(1500));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(6100));
+        let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
         let mut stop_miner_timer = Timer::new(Duration::from_secs(64));
         let mut too_many_req_timer = Timer::new(Duration::from_secs(30));
 
@@ -192,7 +174,7 @@ impl MiningManager {
                 }
             }
 
-            if let Ok(coin) = self.coins_rchan.recv_timeout(Duration::from_millis(10)) {
+            if let Ok(coin) = self.coins_rchan.recv_timeout(Duration::from_millis(50)) {
                 let blob = base64::encode(&coin.blob);
 
                 term.write_line(&format!("\nFound Coin With Blob: {}", blob)).unwrap();
@@ -269,65 +251,73 @@ impl MiningManager {
     }
 }
 
+struct MinerParams {
+    pub stats_schan : mpsc::Sender<Stats>,
+    pub coin_schan : mpsc::SyncSender<Coin>,
+    pub previous_coin : String,
+    pub miner_id : String,
+}
 
 /// Data taken into the thread
-struct MinerThreadData {
-    stats_schan : mpsc::Sender<Stats>,
-    coin_schan : mpsc::SyncSender<Coin>,
-    miner_id : String,
+pub struct MinerThreadData {
+    pub stats_schan : mpsc::Sender<Stats>,
+    pub coin_schan : mpsc::SyncSender<Coin>,
+    pub miner_id : String,
 }
 
 /// Data shared with the thread
 /// managed by a mutex
-struct MinerSharedData {
-    previous_coin : Option<String>,
-    should_stop : bool,
+pub struct MinerSharedData {
+    pub previous_coin : AtomicOption<String>,
+    pub should_stop : AtomicBool,
 }
 
-pub struct Miner {
+pub trait MinerFunction {
+    fn run(self, tdata: MinerThreadData, tsdata: Arc<MinerSharedData>) -> Result<(), Error>;
+}
+
+pub struct Miner<T : MinerFunction + Sized + Send + 'static>
+{
+    miner_func : Option<T>,
     tdata : Option<MinerThreadData>,
-    tsdata : Arc<Mutex<MinerSharedData>>,
+    tsdata : Arc<MinerSharedData>,
     thread : Option<thread::JoinHandle<Result<(), Error>>>
 }
 
-impl Miner {
-    fn new(stats_schan : mpsc::Sender<Stats>,
-        coin_schan : mpsc::SyncSender<Coin>,
-        previous_coin : &str,
-        miner_id : &str) -> Self {
-        let tdata = Some(MinerThreadData {
-            stats_schan,
-            coin_schan,
-            miner_id : String::from(miner_id),
-        });
-
-        let tsdata = Arc::from(Mutex::from(MinerSharedData {
-            previous_coin : Some(String::from(previous_coin)),
-            should_stop : false,
-        }));
-
+impl<T: MinerFunction + Sized + Send + 'static> Miner<T>
+{
+    fn new(miner_func : T, params : MinerParams) -> Self {
         Miner {
-            tdata,
-            tsdata,
+            miner_func : Some(miner_func),
+            tdata : Some(MinerThreadData {
+                stats_schan : params.stats_schan,
+                coin_schan : params.coin_schan,
+                miner_id : params.miner_id,
+            }),
+            tsdata : Arc::from(MinerSharedData {
+                previous_coin : AtomicOption::from(Some(Box::from(params.previous_coin))),
+                should_stop : AtomicBool::new(false),
+            }),
             thread : None
         }
     }
 
     fn run(&mut self) {
-        assert!(self.tdata.is_some());
+        let miner_func = self.miner_func.take().unwrap();
         let tdata = self.tdata.take().unwrap();
-
         let tsdata = self.tsdata.clone();
 
         self.thread = Some(thread::spawn(move || -> Result<(), Error> {
+            let miner_func = miner_func;
+            let tdata = tdata;
             let mut tsdata = tsdata;
-            match Miner::mine(&tdata, &mut tsdata) {
+            match miner_func.run(tdata, tsdata.clone()) {
                 Ok(_) => {
-                    tsdata.lock().unwrap().should_stop = true;
+                    tsdata.should_stop.store(true, Ordering::Relaxed);
                     Ok(())
                 },
                 Err(e) => {
-                    tsdata.lock().unwrap().should_stop = true;
+                    tsdata.should_stop.store(true, Ordering::Relaxed);
                     Err(e)
                 }
             }
@@ -335,118 +325,19 @@ impl Miner {
     }
 
     fn update_prev_coin(&self, coin : String) {
-        self.tsdata.lock().unwrap().previous_coin = Some(coin);
+        self.tsdata.previous_coin.replace(Some(Box::from(coin)), Ordering::Relaxed);
     }
 
     fn is_stopped(&self) -> bool {
-        self.tsdata.lock().unwrap().should_stop
+        self.tsdata.should_stop.load(Ordering::Relaxed)
     }
 
     fn stop(&mut self) -> Result<(), Error> {
-        self.tsdata.lock().unwrap().should_stop = true;
+        self.tsdata.should_stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             Ok(thread.join().unwrap()?)
         } else {
             Ok(())
         }
-    }
-
-    fn mine(tdata : &MinerThreadData, tsdata: &mut Arc<Mutex<MinerSharedData>>) -> Result<(), Error> {
-        use rand::distributions;
-        use cpen442coin::{COIN_PREFIX_STR, MD5_BLOCK_LEN};
-        use arrayvec::ArrayVec;
-
-        let mut rng = rand::thread_rng();
-        let dist = distributions::Uniform::from(0..=255);
-        let mut hasher = Hasher::new(MessageDigest::md5())?;
-
-        let mut previous_coin;
-
-        {
-            previous_coin = tsdata.lock().unwrap().previous_coin.clone().unwrap();
-        }
-
-        let mut suffix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
-        suffix_bytes.try_extend_from_slice(&tdata.miner_id.as_bytes()).unwrap();
-
-        let mut coin_block : ArrayVec<[u8; MD5_BLOCK_LEN * MINER_MAX_BLOCKS]> = ArrayVec::new();
-
-        let mut prefix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
-        prefix_bytes.try_extend_from_slice(COIN_PREFIX_STR.as_bytes()).unwrap();
-        prefix_bytes.try_extend_from_slice(previous_coin.as_bytes()).unwrap();
-
-        let start = Instant::now();
-        let mut last_report_timer = Timer::new(Duration::from_millis(1000));
-        let mut counter = 0;
-
-        loop {
-            {
-                let mut tsdata = tsdata.lock().unwrap();
-
-                if tsdata.previous_coin.is_some() {
-                    previous_coin = tsdata.previous_coin.take().unwrap();
-                    unsafe { prefix_bytes.set_len(COIN_PREFIX_STR.len()); }
-                    prefix_bytes.try_extend_from_slice(previous_coin.as_bytes()).unwrap();
-                }
-
-                if tsdata.should_stop {
-                    break;
-                }
-            }
-
-            coin_block.clear();
-            // Add timestamp
-            coin_block.try_extend_from_slice(&start.elapsed().as_nanos().to_ne_bytes()[..]).unwrap();
-            // openssl RNG
-            let mut b = [0u8; 16];
-            openssl::rand::rand_bytes(&mut b[..]).unwrap();
-            coin_block.try_extend_from_slice(&b[..]).unwrap();
-            // rand RNG
-            let mut sample_len = rng.next_u32() as usize % (MD5_BLOCK_LEN * MINER_MAX_BLOCKS);
-            if sample_len + coin_block.len() > MD5_BLOCK_LEN * (MINER_MAX_BLOCKS - 1) {
-                sample_len -= MD5_BLOCK_LEN;
-            }
-            let cur_len = prefix_bytes.len() + coin_block.len() + sample_len + suffix_bytes.len();
-            let sample_len = cur_len + MD5_BLOCK_LEN - cur_len % MD5_BLOCK_LEN -
-                prefix_bytes.len() - coin_block.len() - suffix_bytes.len();
-            coin_block.extend(rng.sample_iter(dist).take(sample_len));
-
-            for x in 0..=255 {
-                for cb_idx in 0..coin_block.len() {
-                    hasher.update(&prefix_bytes).unwrap();
-                    hasher.update(&coin_block).unwrap();
-                    hasher.update(&suffix_bytes).unwrap();
-                    let h = hasher.finish()?;
-
-                    if h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 0 {
-                        let coin = Coin {
-                            previous_coin,
-                            blob : Vec::from(&coin_block[..])
-                        };
-
-                        match tdata.coin_schan.send(coin) {
-                            Ok(_) => {},
-                            Err(e) => return Err(Error::new(
-                                    format!("Miner Mpsc Send Failed: {:?}", e)))
-                        };
-
-                        return Ok(());
-                    }
-
-                    coin_block[cb_idx] += x;
-
-                    counter += 1;
-                }
-            }
-
-            if last_report_timer.check_and_reset() {
-                tdata.stats_schan.send(Stats{ nhash: counter }).unwrap();
-                counter = 0;
-            }
-        }
-
-        tdata.stats_schan.send(Stats{ nhash: counter }).unwrap();
-
-        Ok(())
     }
 }

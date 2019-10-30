@@ -10,7 +10,9 @@ mod error;
 mod cpen442coin;
 mod miner;
 mod oclminer;
+mod cpuminer;
 mod cryptowallet;
+mod util;
 
 use error::Error;
 
