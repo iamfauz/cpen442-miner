@@ -228,7 +228,7 @@ __kernel void md5(
       md5_state_2[2] = md5_state[2];
       md5_state_2[3] = md5_state[3];
 
-      message[LAST_ROUND_COUNTER_INDEX] = orig3 + (j >> 2) + (j << 20);
+      message[LAST_ROUND_COUNTER_INDEX] = orig3 + (j >> 2) + (j << 24) + (i << 12);
 
       // Perform the last 2 rounds of MD5
       md5_round(md5_state_2, &message[MESSAGE_LEN - 16]);

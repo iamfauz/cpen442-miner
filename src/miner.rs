@@ -183,6 +183,7 @@ impl MiningManager {
 
         let mut coin_count : u64 = 0;
         let mut mine_count : u64 = 0;
+        let mut loop_time : u64 = 0;
 
         term.write_line(&format!("Mining Coin: {}", last_coin)).unwrap();
 
@@ -197,6 +198,7 @@ impl MiningManager {
 
             if let Ok(stat) = self.stats_rchan.recv_timeout(Duration::from_millis(10)) {
                 mine_count += stat.nhash;
+                loop_time = (loop_time + stat.loopms.unwrap_or(loop_time)) / 2;
 
                 if stats_print_timer.check_and_reset() {
                     let elapsed = SystemTime::now().duration_since(start_time)
@@ -219,8 +221,8 @@ impl MiningManager {
                         }
 
                         term.clear_line().unwrap();
-                        term.write_str(&format!("Elapsed Time: {}s, Rate: {:.2} {}Hash/s, Predicted Coin Rate: {} Coins/Hour",
-                                elapsed, rate, prefix, expected_coin_rate)).unwrap();
+                        term.write_str(&format!("Elapsed Time: {}s, Rate: {:.2} {}Hash/s, Predicted Coin Rate: {} Coins/Hour, OpenCL Loop Time: {} ms",
+                                elapsed, rate, prefix, expected_coin_rate, loop_time)).unwrap();
                     }
                 }
             }

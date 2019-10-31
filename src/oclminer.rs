@@ -125,7 +125,7 @@ fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize,
             }
 
             if wrd_idx == LAST_ROUND_COUNTER_INDEX {
-                val += (idx2 >> 2) + (idx2 << 20);
+                val += (idx2 >> 2) + (idx2 << 24) + (idx << 12);
             }
 
             message[i - mod_start..i - mod_start + OCL_WORD_LEN]
