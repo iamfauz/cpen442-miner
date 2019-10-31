@@ -146,7 +146,7 @@ impl MiningManager {
         }
     }
 
-    fn claim_coin(&mut self, term: &Term, coin : &Coin) -> Result<(), ()> {
+    fn claim_coin(&mut self, term: &Term, coin : &Coin) -> Result<(), Error> {
         let mut hasher = Hasher::new(MessageDigest::md5()).unwrap();
         hasher.update(cpen442coin::COIN_PREFIX_STR.as_bytes()).unwrap();
         hasher.update(coin.previous_coin.as_bytes()).unwrap();
@@ -160,12 +160,10 @@ impl MiningManager {
 
         match self.tracker.claim_coin(coin.blob.clone()) {
             Ok(_) => {
-                term.write_line("Coin successfully claimed!").unwrap();
                 Ok(())
             },
             Err(e) => {
-                term.write_line(&format!("Failed to claim coin: {:?}", e)).unwrap();
-                Err(())
+                Err(e)
             }
         }
     }
@@ -183,6 +181,7 @@ impl MiningManager {
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
         let mut stop_miner_timer = Timer::new(Duration::from_secs(48));
         let mut too_many_req_timer = Timer::new(Duration::from_secs(24));
+        let mut claim_coin_timer = Timer::new(Duration::from_millis(1000));
 
         let mut coin_count : u64 = 0;
         let mut mine_count : u64 = 0;
@@ -250,7 +249,9 @@ impl MiningManager {
                             term.write_line(&format!("\nCoin has changed to: {}", last_coin)).unwrap();
                         } else if coin != last_coin && coin == last_last_coin {
                             std::mem::swap(&mut last_coin, &mut last_last_coin);
-                            claim_now = true;
+                            if claim_coin_timer.check_and_reset() {
+                                claim_now = true;
+                            }
                         }
 
                         self.update_miners(&last_coin);
@@ -266,12 +267,18 @@ impl MiningManager {
             }
 
             if claim_now {
-                let mut drop_all = false;
+                let mut claimed = false;
 
                 coins_to_claim.retain(|coin| {
                     if last_coin == coin.previous_coin {
                         match self.claim_coin(&term, coin) {
                             Ok(_) => {
+                                if claimed {
+                                    return false;
+                                }
+
+                                term.write_line("Coin successfully claimed!").unwrap();
+
                                 // Record the coin
                                 if let Some(wallet) = wallet {
                                     let blob = base64::encode(&coin.blob);
@@ -280,7 +287,7 @@ impl MiningManager {
 
                                 // After a coin is successfully claimed
                                 // all older coins are guarenteed to be invalid
-                                drop_all = true;
+                                claimed = true;
                                 check_now = true;
                                 coin_count += 1;
                                 let elapsed = SystemTime::now().duration_since(start_time)
@@ -289,14 +296,25 @@ impl MiningManager {
                                 term.write_line(&format!("Coins Mined: {}, Rate: {:.2} Coins/Hour", coin_count, rate)).unwrap();
                                 false
                             },
-                            Err(_) => { true }
+                            Err(e) => {
+                                if let Error::Request(re) = &e {
+                                    if let Some(code) = re.status() {
+                                        if code.as_u16() == 400 {
+                                            return false;
+                                        }
+                                    }
+                                }
+
+                                term.write_line(&format!("Failed to claim coin: {:?}", e)).unwrap();
+                                true
+                            }
                         }
                     } else {
                         true
                     }
                 });
 
-                if drop_all {
+                if claimed {
                     coins_to_claim.clear();
                 }
 

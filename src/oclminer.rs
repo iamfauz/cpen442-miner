@@ -20,6 +20,7 @@ pub struct OclMinerFunction {
     context : ocl::Context,
     program : ocl::Program,
     device : ocl::Device,
+    workgroup_factor : u32,
     throttle_of_100 : u32
 }
 
@@ -117,8 +118,13 @@ impl OclMinerFunction {
             context,
             program,
             device,
-            throttle_of_100: 0
+            workgroup_factor: 4,
+            throttle_of_100: 0,
         })
+    }
+
+    pub fn workgroup_factor(&mut self, workgroup_factor: u32) {
+        self.workgroup_factor = workgroup_factor;
     }
 
     pub fn throttle(&mut self, utilization : f32) -> Result<(), Error> {
@@ -159,7 +165,7 @@ impl MinerFunction for OclMinerFunction {
             panic!("Big Endian!");
         }
 
-        let parallel = self.device.max_wg_size()?;
+        let parallel = self.device.max_wg_size()? * self.workgroup_factor as usize;
 
         let queue = ocl::Queue::new(&self.context, self.device.clone(), None)?;
 

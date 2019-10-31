@@ -140,7 +140,8 @@ impl Tracker {
     fn get_last_coin_c(url : &str, client : &Client) -> Result<CoinHash, Error> {
         let mut response = client.post(url)
             .header("User-Agent", format!("CPEN442 Miner {}", OsRng.next_u64()))
-            .header("Host", format!("CPEN442.Miner.rand{}site.com", OsRng.next_u64()))
+            .header("X-Forwarded-For", format!("ARandomCPEN442Miner.{}.{}.x",
+                    OsRng.next_u32(), OsRng.next_u32()))
             .send()?;
 
         let code = response.status();
@@ -182,7 +183,50 @@ impl Tracker {
                 id_of_miner: self.miner_id.clone(),
             };
 
-            Self::claim_coin_c(self.claim_coin_url, &self.client, &req)
+            for proxyc in self.proxyclients.choose_multiple(&mut OsRng,
+                std::cmp::min(self.proxyclients.len(), 2)) {
+
+                match Self::claim_coin_c(self.claim_coin_url, proxyc, &req) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        match &e {
+                            Error::Request(re) => {
+                                if re.is_timeout() {
+                                    continue;
+                                }
+
+                                if let Some(code) = re.status() {
+                                    if code.as_u16() != 429 {
+                                        return Err(e);
+                                    }
+                                } else {
+                                    return Err(e);
+                                }
+                            },
+                            _ => return Err(e)
+                        }
+                    },
+                }
+            }
+
+            match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    if let Error::Request(re) = &e {
+                        if let Some(code) = re.status() {
+                            if code.as_u16() != 429 {
+                                return Err(e);
+                            }
+                        } else {
+                            return Err(e);
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                },
+            }
+
+            Err(Error::new("Claim Coin All Requests Failed".into()))
         }
     }
 

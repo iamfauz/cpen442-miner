@@ -32,6 +32,11 @@ struct MinerOclOpts {
     #[structopt(long = "cl-device")]
     cl_device_idx : Option<usize>,
 
+    /// Factor for multiplying the Workgroup Size
+    /// Larger is better but with diminishing returns
+    #[structopt(long = "cl-workgroup-factor", default_value = "4")]
+    cl_workgroup_factor : u32,
+
     /// Attempt to throttle OpenCL GPU usage to this ratio [0 to 1]
     #[structopt(long = "cl-max-utilize")]
     cl_utilization : Option<f32>,
@@ -141,6 +146,8 @@ fn main() -> Result<(), Error> {
         if let Some(th) = opt.ocl.cl_utilization {
             oclf.as_mut().unwrap().throttle(th)?;
         }
+
+        oclf.as_mut().unwrap().workgroup_factor(opt.ocl.cl_workgroup_factor);
     }
 
     let mut mm = miner::MiningManager::new(tracker, ncpu, clthreads, oclf, opt.poll_ms);
