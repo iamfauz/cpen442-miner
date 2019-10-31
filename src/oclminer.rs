@@ -1,7 +1,7 @@
 use ocl;
 use openssl;
 use ocl_extras::full_device_info::FullDeviceInfo;
-use rand::RngCore;
+use rand::{RngCore, rngs::OsRng};
 use crate::{
     error::Error,
     cpen442coin, cpen442coin::COIN_PREFIX_STR,
@@ -11,15 +11,16 @@ use crate::{
 use std::mem::size_of;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Instant, Duration};
+use std::thread;
 
 pub type OclMiner = Miner<OclMinerFunction>;
 
 #[derive(Clone)]
 pub struct OclMinerFunction {
-    #[allow(dead_code)]
-    pub context : ocl::Context,
-    pub program : ocl::Program,
-    pub device : ocl::Device,
+    context : ocl::Context,
+    program : ocl::Program,
+    device : ocl::Device,
+    throttle_of_100 : u32
 }
 
 const DEBUG_ENABLE : usize = 0; // 0 or 1
@@ -116,7 +117,20 @@ impl OclMinerFunction {
             context,
             program,
             device,
+            throttle_of_100: 0
         })
+    }
+
+    pub fn throttle(&mut self, utilization : f32) -> Result<(), Error> {
+        if 0.0 <= utilization && utilization <= 1.0 {
+            self.throttle_of_100 = (100.0 * (1.0 - utilization)) as u32;
+
+            println!("GPU Utilization: {} / 100", 100 - self.throttle_of_100);
+
+            Ok(())
+        } else {
+            Err(Error::Msg("Utilization should be between 0 and 1".into()))
+        }
     }
 }
 
@@ -171,12 +185,16 @@ impl MinerFunction for OclMinerFunction {
             {
                 let mut i = modifiable_start;
                 // Add timestamp
-                let elapsed = start.elapsed().as_nanos().to_ne_bytes();
+                let elapsed = (start.elapsed().as_nanos() + (OsRng.next_u64() as u128) << 64).to_ne_bytes();
                 message[i..i+elapsed[..].len()].copy_from_slice(&elapsed);
                 i += elapsed[..].len();
 
                 // openssl RNG
                 openssl::rand::rand_bytes(&mut message[i..i + 16]).unwrap();
+                i += 16;
+
+                // OS RNG
+                OsRng.fill_bytes(&mut message[i..i + 16]);
                 i += 16;
 
                 // rand RNG
@@ -194,9 +212,9 @@ impl MinerFunction for OclMinerFunction {
                 .build()?;
 
             let params_in = [
+                OsRng.next_u32(),
                 rng.next_u32(),
-                rng.next_u32(),
-                rng.next_u32(),
+                OsRng.next_u32(),
                 rng.next_u32(),
             ];
 
@@ -270,6 +288,7 @@ impl MinerFunction for OclMinerFunction {
             total_ms += loop_start.elapsed().as_millis() as u64;
             loop_iterations += 1;
             counter += (OCL_N_LOOPS as u64) * (OCL_N_LOOPS_2 as u64) * parallel as u64;
+
             if last_report_timer.check_and_reset() {
                 //println!("\nLoop Time {}ms", total_ms as f64 / loop_iterations as f64);
                 tdata.stats_schan.send(Stats{
@@ -277,6 +296,10 @@ impl MinerFunction for OclMinerFunction {
                     loopms: Some(total_ms / loop_iterations)
                 }).unwrap();
                 counter = 0;
+            }
+
+            if loop_iterations % 100 < self.throttle_of_100 as u64 {
+                thread::sleep(Duration::from_millis(2 * total_ms / loop_iterations));
             }
         }
 

@@ -247,6 +247,7 @@ impl MiningManager {
                         }
 
                         self.update_miners(&last_coin);
+                        claim_now = true;
                     },
                     Err(e) => {
                         if too_many_req_timer.check_and_reset() {
@@ -257,7 +258,6 @@ impl MiningManager {
 
                 coin_check_timer.reset();
                 check_now = false;
-                claim_now = true;
             }
 
             if claim_now {
@@ -295,7 +295,7 @@ impl MiningManager {
                     coins_to_claim.clear();
                 }
 
-                while coins_to_claim.len() > 32 {
+                while coins_to_claim.len() > 2 {
                     let coin = coins_to_claim.pop_back().unwrap();
                     term.write_line(&format!("\nDropping Coin with previous_coin: {} blob: {}",
                             coin.previous_coin, hex::encode(coin.blob))).unwrap();

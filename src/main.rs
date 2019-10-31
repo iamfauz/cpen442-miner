@@ -31,6 +31,10 @@ struct MinerOclOpts {
     /// --list-cl-devices to list the devices
     #[structopt(long = "cl-device")]
     cl_device_idx : Option<usize>,
+
+    /// Attempt to throttle OpenCL GPU usage to this ratio [0 to 1]
+    #[structopt(long = "cl-max-utilize")]
+    cl_utilization : Option<f32>,
 }
 
 #[derive(Debug, StructOpt)]
@@ -120,10 +124,14 @@ fn main() -> Result<(), Error> {
 
             oclf = Some(oclminer::OclMinerFunction::new(p.0, p.1)?);
         } else {
-            println!("Bad OpenCL device Index: {}", idx);
+            return Err(Error::Msg(format!("Bad OpenCL device Index: {}", idx)));
         }
 
         println!("Using {} threads for OpenCL", clthreads);
+
+        if let Some(th) = opt.ocl.cl_utilization {
+            oclf.as_mut().unwrap().throttle(th)?;
+        }
     }
 
     let mut mm = miner::MiningManager::new(tracker, ncpu, clthreads, oclf);
