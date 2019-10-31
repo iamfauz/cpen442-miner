@@ -84,7 +84,7 @@ const OCL_BLOB_INDEX : usize = (5 + 8) * 4;
 const OCL_BLOB_LEN : usize = 32 * 4;
 const OCL_MESSAGE_LEN : usize = cpen442coin::MD5_BLOCK_LEN * 4;
 const OCL_N_LOOPS : u32 = 4096;
-const MD5PROGRAM : &str = include_str!("cl/MD5_2.cl");
+const MD5PROGRAM : &str = include_str!("cl/MD5.cl");
 
 // Same transformation as happens on the GPU
 fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize, id: u32, idx : u32) -> Vec<u8> {
