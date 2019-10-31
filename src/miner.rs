@@ -146,7 +146,7 @@ impl MiningManager {
         }
     }
 
-    fn claim_coin(&mut self, term: &Term, coin : &Coin) -> Result<(), Error> {
+    fn claim_coin(&mut self, term: &Term, coin : &Coin) -> Result<String, Error> {
         let mut hasher = Hasher::new(MessageDigest::md5()).unwrap();
         hasher.update(cpen442coin::COIN_PREFIX_STR.as_bytes()).unwrap();
         hasher.update(coin.previous_coin.as_bytes()).unwrap();
@@ -160,7 +160,7 @@ impl MiningManager {
 
         match self.tracker.claim_coin(coin.blob.clone()) {
             Ok(_) => {
-                Ok(())
+                Ok(h)
             },
             Err(e) => {
                 Err(e)
@@ -272,7 +272,7 @@ impl MiningManager {
                 coins_to_claim.retain(|coin| {
                     if last_coin == coin.previous_coin {
                         match self.claim_coin(&term, coin) {
-                            Ok(_) => {
+                            Ok(coinhash) => {
                                 if claimed {
                                     return false;
                                 }
@@ -288,12 +288,14 @@ impl MiningManager {
                                 // After a coin is successfully claimed
                                 // all older coins are guarenteed to be invalid
                                 claimed = true;
-                                check_now = true;
                                 coin_count += 1;
                                 let elapsed = SystemTime::now().duration_since(start_time)
                                     .unwrap().as_secs();
                                 let rate = 3600.0 * coin_count as f32 / elapsed as f32;
                                 term.write_line(&format!("Coins Mined: {}, Rate: {:.2} Coins/Hour", coin_count, rate)).unwrap();
+                                last_coin = coinhash.clone();
+                                last_last_coin = coinhash;
+                                self.update_miners(&last_coin);
                                 false
                             },
                             Err(e) => {
