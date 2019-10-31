@@ -178,8 +178,8 @@ impl MiningManager {
         let start_time = SystemTime::now();
         let mut coin_check_timer = Timer::new(Duration::from_millis(6100));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
-        let mut stop_miner_timer = Timer::new(Duration::from_secs(64));
-        let mut too_many_req_timer = Timer::new(Duration::from_secs(30));
+        let mut stop_miner_timer = Timer::new(Duration::from_secs(48));
+        let mut too_many_req_timer = Timer::new(Duration::from_secs(24));
 
         let mut coin_count : u64 = 0;
         let mut mine_count : u64 = 0;

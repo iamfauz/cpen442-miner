@@ -11,6 +11,7 @@ mod cpen442coin;
 mod miner;
 mod oclminer;
 mod cpuminer;
+mod ocldevice;
 mod cryptowallet;
 mod util;
 
@@ -19,16 +20,17 @@ use error::Error;
 #[derive(Debug, StructOpt)]
 struct MinerOclOpts {
     /// List OpenCL Devices
-    #[structopt(long = "cl-devices")]
+    #[structopt(long = "list-cl-devices")]
     cl_devices : bool,
 
     /// Number of threads to feed OpenCL
     #[structopt(long = "cl-threads")]
     cl_threads : Option<usize>,
 
-    /// Enable OpenCL
-    #[structopt(long = "cl")]
-    cl : bool,
+    /// The index of the device to use.
+    /// --list-cl-devices to list the devices
+    #[structopt(long = "cl-device")]
+    cl_device_idx : Option<usize>,
 }
 
 #[derive(Debug, StructOpt)]
@@ -61,7 +63,10 @@ fn main() -> Result<(), Error> {
     let opt = MinerOpts::from_args();
 
     if opt.ocl.cl_devices {
-        oclminer::list_cl_devices()?;
+        for (i, p) in ocldevice::get_cl_devices()?.iter().enumerate() {
+            println!("Device #{}", i);
+            ocldevice::print_plat_dev_pair(&p)?;
+        }
         return Ok(());
     }
 
@@ -105,11 +110,18 @@ fn main() -> Result<(), Error> {
     }
 
     let mut oclf = None;
-    let clthreads = opt.ocl.cl_threads.unwrap_or(4);
-    if opt.ocl.cl {
-        oclf = Some(oclminer::OclMinerFunction::default()?);
-        println!("Using OpenCL Device:");
-        oclminer::print_device(&oclf.as_ref().unwrap().device)?;
+    let clthreads = opt.ocl.cl_threads.unwrap_or(1);
+    if let Some(idx) = opt.ocl.cl_device_idx {
+        let devices = ocldevice::get_cl_devices()?;
+
+        if let Some(p) = devices.get(idx) {
+            println!("Using OpenCL Device:");
+            ocldevice::print_plat_dev_pair(p)?;
+
+            oclf = Some(oclminer::OclMinerFunction::new(p.0, p.1)?);
+        } else {
+            println!("Bad OpenCL device Index: {}", idx);
+        }
 
         println!("Using {} threads for OpenCL", clthreads);
     }
