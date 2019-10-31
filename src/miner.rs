@@ -259,6 +259,8 @@ impl MiningManager {
             }
 
             if claim_now {
+                let mut drop_all = false;
+
                 coins_to_claim.retain(|coin| {
                     if last_coin == coin.previous_coin {
                         match self.claim_coin(&term, coin) {
@@ -269,6 +271,9 @@ impl MiningManager {
                                     wallet.store(blob, coin.previous_coin.clone());
                                 }
 
+                                // After a coin is successfully claimed
+                                // all older coins are guarenteed to be invalid
+                                drop_all = true;
                                 check_now = true;
                                 coin_count += 1;
                                 let elapsed = SystemTime::now().duration_since(start_time)
@@ -283,6 +288,10 @@ impl MiningManager {
                         true
                     }
                 });
+
+                if drop_all {
+                    coins_to_claim.clear();
+                }
 
                 while coins_to_claim.len() > 32 {
                     let coin = coins_to_claim.pop_back().unwrap();
