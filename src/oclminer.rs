@@ -8,6 +8,7 @@ use crate::{
     miner::{Coin, Stats, Miner, MinerFunction, MinerThreadData, MinerSharedData},
     util::Timer
 };
+use std::mem::size_of;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Instant, Duration};
 
@@ -80,38 +81,54 @@ pub struct OclMinerFunction {
     pub device : ocl::Device,
 }
 
-const OCL_BLOB_INDEX : usize = (5 + 8) * 4;
-const OCL_BLOB_LEN : usize = 32 * 4;
+const DEBUG_ENABLE : usize = 0; // 0 or 1
+
+const OCL_WORD_LEN : usize = size_of::<u32>();
 const OCL_MESSAGE_LEN : usize = cpen442coin::MD5_BLOCK_LEN * 4;
-const OCL_N_LOOPS : u32 = 4096;
+const OCL_BLOB_INDEX : usize = 5 * 4 + cpen442coin::MD5_HASH_HEX_LEN;
+const OCL_BLOB_LEN_FAST : usize = 32 * 4;
+// Message: ["CPEN 442..." | PREV_COIN | BLOB | TRACKER]
+const OCL_BLOB_LEN : usize = OCL_MESSAGE_LEN - cpen442coin::MD5_HASH_HEX_LEN - OCL_BLOB_INDEX;
+const OCL_COUNTER_INDEX : usize = cpen442coin::MD5_BLOCK_LEN * 3 + OCL_WORD_LEN;
+const OCL_N_LOOPS : u32 = 64;
+const OCL_N_LOOPS_2 : u32 = 128;
 const MD5PROGRAM : &str = include_str!("cl/MD5.cl");
 
 // Same transformation as happens on the GPU
-fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize, id: u32, idx : u32) -> Vec<u8> {
-    use std::mem::size_of;
+fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize,
+    id: u32, idx : u32, idx2 : u32) -> Vec<u8> {
     use slice_of_array::SliceArrayExt;
-    const BLOB_INDEX : usize = OCL_BLOB_INDEX / 4;
-    const BLOB_LEN : usize = OCL_BLOB_LEN / 4;
+    const BLOB_INDEX : usize = OCL_BLOB_INDEX / OCL_WORD_LEN;
+    const BLOB_LEN_FAST : usize = OCL_BLOB_LEN_FAST / OCL_WORD_LEN;
+    const LAST_ROUND_COUNTER_INDEX : usize = OCL_COUNTER_INDEX / OCL_WORD_LEN;
     let mut message = Vec::from(&message_base[mod_start..mod_end]);
+    if DEBUG_ENABLE > 0 {
+        println!("id {}, idx {}, idx2 {}", id, idx, idx2);
+        println!("LAST_ROUND_COUNTER_INDEX {}", LAST_ROUND_COUNTER_INDEX);
+    }
 
-    for i in (0..message_base.len()).step_by(size_of::<u32>()) {
-        let wrd_idx = i / size_of::<u32>();
-        if BLOB_INDEX <= wrd_idx && wrd_idx <= BLOB_INDEX + BLOB_LEN {
-            let mut val = u32::from_le_bytes(*message_base[i..i+size_of::<u32>()].as_array());
+    for i in (0..message_base.len()).step_by(OCL_WORD_LEN) {
+        let wrd_idx = i / OCL_WORD_LEN;
+        if mod_start <= i && i < mod_end {
+            let mut val = u32::from_le_bytes(*message_base[i..i+OCL_WORD_LEN].as_array());
 
-            if wrd_idx == (BLOB_INDEX + (id as usize) % BLOB_LEN) {
-                val += id + idx;
+            if wrd_idx == (BLOB_INDEX + (id as usize) % BLOB_LEN_FAST) {
+                val += id + idx * 4;
             }
 
-            if wrd_idx == (BLOB_INDEX + ((id as usize) + BLOB_LEN / 4) % BLOB_LEN) {
+            if wrd_idx == (BLOB_INDEX + ((id as usize) + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST) {
                 val ^= (id << 16) | id;
             }
 
-            if wrd_idx == (BLOB_INDEX + BLOB_LEN) {
+            if wrd_idx == (BLOB_INDEX + BLOB_LEN_FAST) {
                 val += (id << 16) + idx;
             }
 
-            message[i - mod_start..i - mod_start + size_of::<u32>()]
+            if wrd_idx == LAST_ROUND_COUNTER_INDEX {
+                val += (idx2 >> 2) + (idx2 << 20);
+            }
+
+            message[i - mod_start..i - mod_start + OCL_WORD_LEN]
                 .copy_from_slice(&val.to_le_bytes());
         }
     }
@@ -131,18 +148,26 @@ impl OclMinerFunction {
             .devices(&device)
             .build()?;
 
-        use std::mem::size_of;
-
         let mut md5_program = format!("
 #define MESSAGE_LEN ({message_len})
 #define BLOB_INDEX ({blob_index})
+#define BLOB_LEN_FAST ({blob_len_fast})
 #define BLOB_LEN ({blob_len})
 #define N_LOOPS ({n_loops})
+#define N_LOOPS_2 ({n_loops_2})
+#define LAST_ROUND_COUNTER_INDEX ({counter_index})
 \n",
-            message_len=OCL_MESSAGE_LEN / size_of::<u32>(),
-            blob_index=OCL_BLOB_INDEX / size_of::<u32>(),
-            blob_len=OCL_BLOB_LEN / size_of::<u32>(),
-            n_loops=OCL_N_LOOPS);
+            message_len=OCL_MESSAGE_LEN / OCL_WORD_LEN,
+            blob_index=OCL_BLOB_INDEX / OCL_WORD_LEN,
+            blob_len_fast=OCL_BLOB_LEN_FAST / OCL_WORD_LEN,
+            blob_len=OCL_BLOB_LEN / OCL_WORD_LEN,
+            n_loops=OCL_N_LOOPS,
+            n_loops_2=OCL_N_LOOPS_2,
+            counter_index=OCL_COUNTER_INDEX / OCL_WORD_LEN);
+
+        if DEBUG_ENABLE > 0 {
+            md5_program += "\n\n#define __DEBUG_MODE__\n\n";
+        }
 
         md5_program += MD5PROGRAM;
 
@@ -161,8 +186,6 @@ impl OclMinerFunction {
 
 impl MinerFunction for OclMinerFunction {
     fn run(self, tdata : MinerThreadData, tsdata: Arc<MinerSharedData>) -> Result<(), Error> {
-        use std::mem::size_of;
-
         let mut rng = rand::thread_rng();
 
         let start = Instant::now();
@@ -196,8 +219,7 @@ impl MinerFunction for OclMinerFunction {
             .queue(queue.clone())
             .global_work_size(parallel)
             .arg_named("base_message", None::<&ocl::Buffer<u32>>)
-            .arg_named("md5_prefix_out", None::<&ocl::Buffer<u32>>)
-            .arg_named("message_out", None::<&ocl::Buffer<u8>>)
+            .arg_named("params_out", None::<&ocl::Buffer<u32>>)
             .build()?;
 
         while ! tsdata.should_stop.load(Ordering::Relaxed) {
@@ -224,60 +246,66 @@ impl MinerFunction for OclMinerFunction {
                 rng.fill_bytes(&mut message[i..modifiable_end]);
             }
 
-            let message_words : &[u32; OCL_MESSAGE_LEN / size_of::<u32>()] = 
+            let message_words : &[u32; OCL_MESSAGE_LEN / OCL_WORD_LEN] = 
                 unsafe { std::mem::transmute(&message) };
 
             let msg_buf = ocl::Buffer::<u32>::builder()
                 .queue(queue.clone())
                 .flags(ocl::flags::MEM_READ_ONLY)
-                .len(OCL_MESSAGE_LEN / size_of::<u32>())
+                .len(OCL_MESSAGE_LEN / OCL_WORD_LEN)
                 .copy_host_slice(message_words)
                 .build()?;
 
-            let mut id_out = vec![0xFFFFFFFFu32; 6];
+            const OCL_PARAMS_LEN : usize = 4 +
+                DEBUG_ENABLE * (OCL_MESSAGE_LEN + cpen442coin::MD5_HASH_LEN);
 
-            let id_out_buf = ocl::Buffer::<u32>::builder()
+            let mut params_out = [0xFFFFFFFFu32; OCL_PARAMS_LEN];
+
+            let params_out_buf = ocl::Buffer::<u32>::builder()
                 .queue(queue.clone())
                 .flags(ocl::flags::MEM_READ_WRITE)
-                .len(6)
-                .copy_host_slice(&id_out[..])
-                .build()?;
-
-            let mut msg_out = vec![0u8; OCL_MESSAGE_LEN];
-
-            let msg_out_buf = ocl::Buffer::<u8>::builder()
-                .queue(queue.clone())
-                .flags(ocl::flags::MEM_READ_WRITE)
-                .len(OCL_MESSAGE_LEN)
-                .copy_host_slice(&msg_out[..])
+                .len(OCL_PARAMS_LEN)
+                .copy_host_slice(&params_out[..])
                 .build()?;
 
             kernel.set_arg("base_message", &msg_buf)?;
-            kernel.set_arg("md5_prefix_out", &id_out_buf)?;
-            kernel.set_arg("message_out", &msg_out_buf)?;
+            kernel.set_arg("params_out", &params_out_buf)?;
 
             unsafe { kernel.cmd().queue(&queue).enq()?; }
 
-            id_out_buf.cmd()
+            params_out_buf.cmd()
                 .queue(&queue)
                 .offset(0)
-                .read(&mut id_out)
-                .enq()?;
-
-            msg_out_buf.cmd()
-                .queue(&queue)
-                .offset(0)
-                .read(&mut msg_out)
+                .read(&mut params_out[..])
                 .enq()?;
 
             queue.finish()?;
 
-            if id_out[0] != 0xFFFFFFFF {
+            if params_out[0] != 0xFFFFFFFF {
+                if DEBUG_ENABLE > 0 {
+                    let mut hash = Vec::new();
+
+                    for i in 3..=6 {
+                        hash.extend_from_slice(&params_out[i].to_le_bytes());
+                    }
+
+                    println!("\nDEBUG GPU Hash: {}\n", hex::encode(hash));
+
+                    let mut gpu_message = Vec::new();
+
+                    for i in 7..7+(OCL_MESSAGE_LEN / OCL_WORD_LEN) {
+                        gpu_message.extend_from_slice(&params_out[i].to_le_bytes());
+                    }
+
+                    println!("\nDEBUG GPU Message: {}\n", hex::encode(gpu_message));
+                    println!("\nDEBUG Base Message: {}\n", hex::encode(&message[..]));
+                }
+
                 let coin = Coin {
                     previous_coin : (*previous_coin).clone(),
                     //blob : message_for_id(message_words, i as u32)
                     blob : message_for_id(&message, modifiable_start, modifiable_end,
-                        id_out[0], id_out[1])
+                        params_out[0], params_out[1], params_out[2])
                 };
 
                 match tdata.coin_schan.send(coin) {
@@ -289,9 +317,9 @@ impl MinerFunction for OclMinerFunction {
 
             total_ms += loop_start.elapsed().as_millis() as u64;
             loop_iterations += 1;
-            counter += OCL_N_LOOPS as u64 * parallel as u64;
+            counter += (OCL_N_LOOPS as u64) * (OCL_N_LOOPS_2 as u64) * parallel as u64;
             if last_report_timer.check_and_reset() {
-                //println!("Loop Time {}ms", total_ms as f64 / loop_iterations as f64);
+                //println!("\nLoop Time {}ms", total_ms as f64 / loop_iterations as f64);
                 tdata.stats_schan.send(Stats{
                     nhash: counter,
                     loopms: Some(total_ms / loop_iterations)
@@ -305,13 +333,12 @@ impl MinerFunction for OclMinerFunction {
 }
 
 fn to_big_endian_u32(buf : &mut [u8]) {
-    use std::mem::size_of;
     use slice_of_array::SliceArrayExt;
-    assert_eq!(buf.len() % size_of::<u32>(), 0);
+    assert_eq!(buf.len() % OCL_WORD_LEN, 0);
 
-    for i in (0..buf.len()).step_by(size_of::<u32>()) {
-        let val = u32::from_le_bytes(*buf[i..i+size_of::<u32>()].as_array());
+    for i in (0..buf.len()).step_by(OCL_WORD_LEN) {
+        let val = u32::from_le_bytes(*buf[i..i+OCL_WORD_LEN].as_array());
 
-        buf[i..i+size_of::<u32>()].copy_from_slice(&val.to_be_bytes());
+        buf[i..i+OCL_WORD_LEN].copy_from_slice(&val.to_be_bytes());
     }
 }

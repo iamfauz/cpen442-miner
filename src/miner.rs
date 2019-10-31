@@ -51,7 +51,7 @@ impl MiningManager {
         let nproducers = ncpu;
         let noclproducers = nocl;
         let (stats_schan, stats_rchan) = mpsc::channel();
-        let (coins_schan, coins_rchan) = mpsc::sync_channel(nproducers);
+        let (coins_schan, coins_rchan) = mpsc::sync_channel(ncpu + nocl);
         let miners = VecDeque::new();
         let oclminers = VecDeque::new();
 

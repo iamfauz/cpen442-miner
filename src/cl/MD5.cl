@@ -15,6 +15,7 @@
 #define GET(i) (message[(i)])
 
 // void md5_round(uint* internal_state, const uint* message);
+// Credit to https://github.com/awreece/pdfcrack-opencl for the MD5 algorithm
 static inline void md5_round(uint* internal_state, const uint* message) {
   uint a, b, c, d;
   a = internal_state[0];
@@ -123,25 +124,35 @@ static inline void md5_round(uint* internal_state, const uint* message) {
 
 // Length of the modifiable part of the message
 #ifndef BLOB_LEN
-//#define BLOB_LEN (MESSAGE_LEN - _TRACKER_ID_LEN - BLOB_INDEX)
 // 64 - 8 - 8 - 5 = 43
-#define BLOB_LEN 32 // Nearest power of 2 for performance
-#endif // BLOB_LEN
+#define BLOB_LEN (MESSAGE_LEN - _TRACKER_ID_LEN - BLOB_INDEX)
+#endif
 
-// The parallelism, used to effectively
-// modify the message so each core has a unique string
-//#ifndef N_PARALLEL
-//#define N_PARALLEL 1024
-//#endif // N_PARALLEL
+// Largest power of 2 that fits in BLOB_LEN for performance
+#ifndef BLOB_LEN_FAST
+#define BLOB_LEN_FAST 32
+#endif // BLOB_LEN_FAST
+
+// The index of the counter
+// This must be in the last round of MD5 for it to generate
+// more unique hashes
+#ifndef LAST_ROUND_COUNTER_INDEX
+#define LAST_ROUND_COUNTER_INDEX (192 / 4)
+#endif
 
 // Number of loops to do
 #ifndef N_LOOPS
 #define N_LOOPS 4096
 #endif
 
+// Number of inner (fast) loops to do
+#ifndef N_LOOPS_2
+#define N_LOOPS_2 256
+#endif
+
 // Check endianess as this program is only good for little endian
 #ifndef __LITTLE_ENDIAN__
-#error ENDIANESS
+#error This kernel currently only supports little endian architectures!
 #endif
 
 /**
@@ -161,10 +172,9 @@ static inline void md5_round(uint* internal_state, const uint* message) {
 __kernel void md5(
     // The base message (randomly generated)
     __constant uint* base_message,
-    // An array indexed by the processor's ID to place
-    // the first 32 bits of the md5 hash
-    __global uint* md5_prefix_out,
-    __global uint* message_out) {
+    // The parameters output to the program
+    // Note that many processing units may try to write to this location
+    __global uint* params_out) {
   uint i;
   uint j;
   const uint id = get_global_id(0);
@@ -186,12 +196,13 @@ __kernel void md5(
     message[i] = base_message[i];
   }
 
-  uint orig0 = message[BLOB_INDEX + id % BLOB_LEN];
-  uint orig1 = message[BLOB_INDEX + (id + BLOB_LEN / 4) % BLOB_LEN];
-  uint orig2 = message[BLOB_INDEX + BLOB_LEN];
+  uint orig0 = message[BLOB_INDEX + id % BLOB_LEN_FAST];
+  uint orig1 = message[BLOB_INDEX + (id + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST];
+  uint orig2 = message[BLOB_INDEX + BLOB_LEN_FAST];
+  uint orig3 = message[LAST_ROUND_COUNTER_INDEX];
 
   uint md5_state[4];
-
+  uint md5_state_2[4];
 
   for (i = 0; i < N_LOOPS; ++i) {
     // Initialize MD5
@@ -201,33 +212,49 @@ __kernel void md5(
     md5_state[3] = 0x10325476;
 
     // Modify the message per iteration based on ID
-    message[BLOB_INDEX + id % BLOB_LEN] = orig0 + id + i;
-    message[BLOB_INDEX + (id + BLOB_LEN / 4) % BLOB_LEN] = orig1 ^ ((id << 16) | id);
-    message[BLOB_INDEX + BLOB_LEN] = orig2 + (id << 16) + i;
+    message[BLOB_INDEX + id % BLOB_LEN_FAST] = orig0 + id + i * 4;
+    message[BLOB_INDEX + (id + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST] = orig1 ^ ((id << 16) | id);
+    message[BLOB_INDEX + BLOB_LEN_FAST] = orig2 + (id << 16) + i;
 
-    // Perform MD5
-    for (j = 0; j < MESSAGE_LEN / 16; ++j) {
+    // Perform MD5 till before the last round
+    for (j = 0; j < MESSAGE_LEN / 16 - 1; ++j) {
       md5_round(md5_state, &message[j * 16]);
     }
 
-    md5_round(md5_state, zero_pad);
+    for (j = 0; j < N_LOOPS_2; ++j) {
+      // Don't clobber our state
+      md5_state_2[0] = md5_state[0];
+      md5_state_2[1] = md5_state[1];
+      md5_state_2[2] = md5_state[2];
+      md5_state_2[3] = md5_state[3];
 
-    // Note skip the padding algorithm since the
-    // message is already a multiple of the block size
+      message[LAST_ROUND_COUNTER_INDEX] = orig3 + (j >> 2) + (j << 20);
 
-    // Output our prefix
-    if (md5_state[0] == 0 && md5_prefix_out[0] == 0xFFFFFFFF) {
-      md5_prefix_out[0] = id;
-      md5_prefix_out[1] = i;
-      md5_prefix_out[2] = md5_state[0];
-      md5_prefix_out[3] = md5_state[1];
-      md5_prefix_out[4] = md5_state[2];
-      md5_prefix_out[5] = md5_state[3];
+      // Perform the last 2 rounds of MD5
+      md5_round(md5_state_2, &message[MESSAGE_LEN - 16]);
+      md5_round(md5_state_2, zero_pad);
 
-      for (j = 0; j < MESSAGE_LEN; ++j) {
-	message_out[j] = message[j];
+      // Note skip the padding algorithm since the
+      // message is already a multiple of the block size
+
+      // Output our prefix
+      if (md5_state_2[0] == 0 && params_out[0] == 0xFFFFFFFF) {
+        params_out[0] = id;
+        params_out[1] = i;
+        params_out[2] = j;
+
+#ifdef __DEBUG_MODE__
+        params_out[3] = md5_state_2[0];
+        params_out[4] = md5_state_2[1];
+        params_out[5] = md5_state_2[2];
+        params_out[6] = md5_state_2[3];
+
+        for (i = 0; i < MESSAGE_LEN; ++i) {
+          params_out[7 + i] = message[i];
+        }
+#endif
+        break;
       }
-      break;
     }
   }
 }

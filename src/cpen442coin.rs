@@ -11,8 +11,8 @@ use openssl::hash;
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
 pub const MD5_BLOCK_LEN : usize = 512 / 8;
-#[allow(dead_code)]
 pub const MD5_HASH_LEN : usize = 128 / 8;
+pub const MD5_HASH_HEX_LEN : usize = MD5_HASH_LEN * 2;
 
 pub type CoinHash = String;
 

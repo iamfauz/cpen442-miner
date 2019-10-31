@@ -79,6 +79,11 @@ fn main() -> Result<(), Error> {
         identity = opt.identity.unwrap();
     }
 
+    if identity.len() != cpen442coin::MD5_HASH_HEX_LEN {
+        return Err(Error::Msg(format!("Identity should be of length {}",
+                    cpen442coin::MD5_HASH_HEX_LEN)));
+    }
+
     println!("Mining with Identity: {}", identity);
 
     let ncpu = opt.ncpu.unwrap_or(num_cpus::get());
