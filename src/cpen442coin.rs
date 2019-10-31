@@ -2,11 +2,12 @@
 //!
 //!
 use base64;
-use reqwest::Client;
+use reqwest::{Client,Proxy};
 use serde::{Serialize, Deserialize};
 use std::time::Duration;
 use crate::error::Error;
 use openssl::hash;
+use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
@@ -19,6 +20,7 @@ pub type CoinHash = String;
 pub struct Tracker {
     miner_id : String,
     client : Client,
+    proxyclients : Vec<Client>,
     last_coin_url : &'static str,
     claim_coin_url : &'static str,
     fake_last_coin : Option<String>
@@ -49,24 +51,36 @@ const CLAIM_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/claim_coin";
 const VERIFY_EXAMPLE_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/verify_example_coin";
 
 impl Tracker {
-    pub fn new(miner_id: String) -> Tracker {
+    pub fn new(miner_id: String, proxies : Vec<String>) -> Result<Tracker, Error> {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .gzip(false)
-            .build()
-            .expect("Failed to construct HTTP Client");
+            .build()?;
 
-        Tracker {
+        let mut proxyclients = Vec::new();
+        for proxy in proxies {
+            println!("HTTP Proxy: {}", proxy);
+
+            let proxyc = Client::builder()
+                .timeout(Duration::from_secs(3))
+                .gzip(false) 
+                .proxy(Proxy::http(&proxy)?)
+                .build()?;
+
+            proxyclients.push(proxyc);
+        }
+
+        Ok(Tracker {
             miner_id,
             client,
+            proxyclients,
             last_coin_url : LAST_COIN_URL,
             claim_coin_url : CLAIM_COIN_URL,
             fake_last_coin : None
-        }
+        })
     }
 
-    pub fn new_fake(miner_id: String) -> Tracker {
-        use rand::{rngs::OsRng, RngCore};
+    pub fn new_fake(miner_id: String) -> Result<Tracker, Error> {
         // Generate a random starting coin
         let mut hasher = hash::Hasher::new(hash::MessageDigest::md5()).unwrap();
         hasher.update(miner_id.as_bytes()).unwrap();
@@ -79,21 +93,21 @@ impl Tracker {
 
         let fake_last_coin = hex::encode(&fake_last_coin[..]);
 
-        let mut t = Self::new(miner_id);
+        let mut t = Self::new(miner_id, Vec::new())?;
         t.last_coin_url = "FAKE";
         t.claim_coin_url = "FAKE";
         t.fake_last_coin = Some(fake_last_coin);
 
-        t
+        Ok(t)
     }
 
     #[allow(dead_code)]
-    pub fn new_verify(miner_id: String) -> Tracker {
-        let mut t = Self::new(miner_id);
+    pub fn new_verify(miner_id: String) -> Result<Tracker, Error> {
+        let mut t = Self::new(miner_id, Vec::new())?;
 
         t.claim_coin_url = VERIFY_EXAMPLE_COIN_URL;
 
-        t
+        Ok(t)
     }
 
     pub fn id(&self) -> &str {
@@ -104,21 +118,42 @@ impl Tracker {
         if let Some(fake_coin) = &self.fake_last_coin {
             Ok(fake_coin.clone())
         } else {
-            let mut response = self.client.post(self.last_coin_url).send()?;
+            for proxyc in self.proxyclients.choose_multiple(&mut OsRng,
+                std::cmp::min(self.proxyclients.len(), 3)) {
 
-            let code = response.status();
-
-            if code.is_success() {
-                let response : LastCoinResp = response.json()?;
-
-                Ok(response.coin_id)
-            } else {
-                Err(Error::new(format!("Get Last Coin Failed Http {}: {}",
-                            code.as_u16(), code.canonical_reason().unwrap_or(""))))
+                match Self::get_last_coin_c(self.last_coin_url, proxyc) {
+                    Ok(coin) => {
+                        if coin.len() == MD5_HASH_HEX_LEN {
+                            if let Ok(_) = hex::decode(&coin) {
+                                return Ok(coin)
+                            }
+                        }
+                    },
+                    Err(_) => {},
+                }
             }
+
+            Self::get_last_coin_c(self.last_coin_url, &self.client)
         }
     }
 
+    fn get_last_coin_c(url : &str, client : &Client) -> Result<CoinHash, Error> {
+        let mut response = client.post(url)
+            .header("User-Agent", format!("CPEN442 Miner {}", OsRng.next_u64()))
+            .header("Host", format!("CPEN442.Miner.rand{}site.com", OsRng.next_u64()))
+            .send()?;
+
+        let code = response.status();
+
+        if code.is_success() {
+            let response : LastCoinResp = response.json()?;
+
+            Ok(response.coin_id)
+        } else {
+            Err(Error::new(format!("Get Last Coin Failed Http {}: {}",
+                        code.as_u16(), code.canonical_reason().unwrap_or(""))))
+        }
+    }
 
     pub fn claim_coin(&mut self, blob: Vec<u8>) -> Result<(), Error> {
         if let Some(fake_coin) = &self.fake_last_coin {
@@ -147,27 +182,31 @@ impl Tracker {
                 id_of_miner: self.miner_id.clone(),
             };
 
-            use reqwest::header::CONTENT_TYPE;
+            Self::claim_coin_c(self.claim_coin_url, &self.client, &req)
+        }
+    }
 
-            let mut response = self.client.post(self.claim_coin_url)
-                .header(CONTENT_TYPE, "application/json")
-                .json(&req).send()?;
+    fn claim_coin_c(url : &str, client : &Client, req : &ClaimCoinReq) -> Result<(), Error> {
+        use reqwest::header::CONTENT_TYPE;
 
-            let code = response.status();
+        let mut response = client.post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(req).send()?;
 
-            if code.is_success() {
-                let response : ClaimCoinResp = response.json()?;
+        let code = response.status();
 
-                use ClaimCoinResp::*;
-                match response {
-                    Fail { fail } => Err(Error::new(
-                            format!("Claim Coin failed with error: {}", fail))),
-                            Success { success : _ } => Ok(())
-                }
-            } else {
-                Err(Error::new(format!("Claim Coin failed Http {}: {}",
-                            code.as_u16(), code.canonical_reason().unwrap_or(""))))
+        if code.is_success() {
+            let response : ClaimCoinResp = response.json()?;
+
+            use ClaimCoinResp::*;
+            match response {
+                Fail { fail } => Err(Error::new(
+                        format!("Claim Coin failed with error: {}", fail))),
+                        Success { success : _ } => Ok(())
             }
+        } else {
+            Err(Error::new(format!("Claim Coin failed Http {}: {}",
+                        code.as_u16(), code.canonical_reason().unwrap_or(""))))
         }
     }
 }
@@ -179,7 +218,8 @@ mod tests {
 
     #[test]
     fn test_last_coin_ok() {
-        let mut t = Tracker::new("d41f33d21c5b2c49053c2b1cc2a8cc84".into());
+        let mut t = Tracker::new("d41f33d21c5b2c49053c2b1cc2a8cc84".into(),
+            Vec::new()).unwrap();
 
         let coin = t.get_last_coin().unwrap();
 
@@ -190,7 +230,7 @@ mod tests {
 
     #[test]
     fn test_claim_coin_ok() {
-        let mut t = Tracker::new_verify("d41f33d21c5b2c49053c2b1cc2a8cc84".into());
+        let mut t = Tracker::new_verify("d41f33d21c5b2c49053c2b1cc2a8cc84".into()).unwrap();
         //t.claim_coin_url = "http://localhost:55555/verify_example_coin";
 
         let coin = base64::decode("WICbUP4soPxDWXV92qR6dpP7Rhs=").unwrap();
@@ -200,7 +240,7 @@ mod tests {
 
     #[test]
     fn test_claim_coin_fail() {
-        let mut t = Tracker::new_verify("d41f33d21c5b2c49052b1cc2a8cc84".into());
+        let mut t = Tracker::new_verify("d41f33d21c5b2c49052b1cc2a8cc84".into()).unwrap();
         //t.claim_coin_url = "http://localhost:55555/verify_coin";
 
         let coin = base64::decode("WICbUP4soPxDWXV92qR6dpP7Rhs=").unwrap();

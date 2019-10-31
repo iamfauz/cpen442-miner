@@ -39,6 +39,7 @@ pub struct MiningManager {
     coins_schan : mpsc::SyncSender<Coin>,
     nproducers : usize,
     noclproducers : usize,
+    poll_ms : u32,
     miners : VecDeque<CpuMiner>,
     oclminers : VecDeque<OclMiner>,
     oclminerf : Option<OclMinerFunction>,
@@ -47,7 +48,8 @@ pub struct MiningManager {
 impl MiningManager {
     pub fn new(tracker : cpen442coin::Tracker,
         ncpu : usize, nocl : usize,
-        oclf : Option<OclMinerFunction>) -> Self {
+        oclf : Option<OclMinerFunction>,
+        poll_ms : u32) -> Self {
         let nproducers = ncpu;
         let noclproducers = nocl;
         let (stats_schan, stats_rchan) = mpsc::channel();
@@ -63,6 +65,7 @@ impl MiningManager {
             coins_schan,
             nproducers,
             noclproducers,
+            poll_ms,
             miners,
             oclminerf: oclf,
             oclminers,
@@ -176,7 +179,7 @@ impl MiningManager {
         let mut claim_now = false;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(6100));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(self.poll_ms.into()));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
         let mut stop_miner_timer = Timer::new(Duration::from_secs(48));
         let mut too_many_req_timer = Timer::new(Duration::from_secs(24));
@@ -196,6 +199,7 @@ impl MiningManager {
                 self.start_ocl_miner(&last_coin);
             }
 
+            // Print the stats periodically
             if let Ok(stat) = self.stats_rchan.recv_timeout(Duration::from_millis(10)) {
                 mine_count += stat.nhash;
                 loop_time = (loop_time + stat.loopms.unwrap_or(loop_time)) / 2;
@@ -241,13 +245,15 @@ impl MiningManager {
                         if coin != last_coin && coin != last_last_coin {
                             last_last_coin = last_coin;
                             last_coin = coin;
+                            // Haven't seen this coin, probably invalidates what we have now
+                            coins_to_claim.clear();
                             term.write_line(&format!("\nCoin has changed to: {}", last_coin)).unwrap();
                         } else if coin != last_coin && coin == last_last_coin {
                             std::mem::swap(&mut last_coin, &mut last_last_coin);
+                            claim_now = true;
                         }
 
                         self.update_miners(&last_coin);
-                        claim_now = true;
                     },
                     Err(e) => {
                         if too_many_req_timer.check_and_reset() {
@@ -256,7 +262,6 @@ impl MiningManager {
                     }
                 };
 
-                coin_check_timer.reset();
                 check_now = false;
             }
 

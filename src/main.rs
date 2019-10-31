@@ -59,6 +59,14 @@ struct MinerOpts {
     #[structopt(short = "o", long = "output", parse(from_os_str))]
     wallet : Option<PathBuf>,
 
+    /// HTTP Proxies to use
+    #[structopt(long = "proxy")]
+    http_proxies : Option<Vec<String>>,
+
+    /// How often to poll last_coin in milliseconds
+    #[structopt(long = "poll-ms", default_value = "6000")]
+    poll_ms : u32,
+
     #[structopt(flatten)]
     ocl : MinerOclOpts,
 }
@@ -103,9 +111,10 @@ fn main() -> Result<(), Error> {
     let mut wallet = None;
     if opt.fake {
         println!("WARNING: Using Fake Tracker, Coins Not Recorded!");
-        tracker = cpen442coin::Tracker::new_fake(identity.clone());
+        tracker = cpen442coin::Tracker::new_fake(identity.clone())?;
     } else {
-        tracker = cpen442coin::Tracker::new(identity.clone());
+        tracker = cpen442coin::Tracker::new(identity.clone(),
+            opt.http_proxies.unwrap_or(Vec::new()))?;
 
         if let Some(wallet_path) = opt.wallet {
             println!("Wallet Path: {:?}", wallet_path);
@@ -134,7 +143,7 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    let mut mm = miner::MiningManager::new(tracker, ncpu, clthreads, oclf);
+    let mut mm = miner::MiningManager::new(tracker, ncpu, clthreads, oclf, opt.poll_ms);
 
     mm.run(&mut wallet)?;
 
