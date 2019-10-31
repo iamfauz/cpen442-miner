@@ -32,12 +32,12 @@ const OCL_BLOB_LEN_FAST : usize = 32 * 4;
 const OCL_BLOB_LEN : usize = OCL_MESSAGE_LEN - cpen442coin::MD5_HASH_HEX_LEN - OCL_BLOB_INDEX;
 const OCL_COUNTER_INDEX : usize = cpen442coin::MD5_BLOCK_LEN * 3 + OCL_WORD_LEN;
 const OCL_N_LOOPS : u32 = 64;
-const OCL_N_LOOPS_2 : u32 = 128;
+const OCL_N_LOOPS_2 : u32 = 256;
 const MD5PROGRAM : &str = include_str!("cl/MD5.cl");
 
 // Same transformation as happens on the GPU
 fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize,
-    id: u32, idx : u32, idx2 : u32) -> Vec<u8> {
+    id: u32, idx : u32, idx2 : u32, r : &[u32; 4]) -> Vec<u8> {
     use slice_of_array::SliceArrayExt;
     const BLOB_INDEX : usize = OCL_BLOB_INDEX / OCL_WORD_LEN;
     const BLOB_LEN_FAST : usize = OCL_BLOB_LEN_FAST / OCL_WORD_LEN;
@@ -53,20 +53,20 @@ fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize,
         if mod_start <= i && i < mod_end {
             let mut val = u32::from_le_bytes(*message_base[i..i+OCL_WORD_LEN].as_array());
 
-            if wrd_idx == (BLOB_INDEX + (id as usize) % BLOB_LEN_FAST) {
+            if wrd_idx == (BLOB_INDEX + ((id + r[0]) as usize) % BLOB_LEN_FAST) {
                 val += id + idx * 4;
             }
 
-            if wrd_idx == (BLOB_INDEX + ((id as usize) + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST) {
+            if wrd_idx == (BLOB_INDEX + (((id + r[1]) as usize) + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST) {
                 val ^= (id << 16) | id;
             }
 
             if wrd_idx == (BLOB_INDEX + BLOB_LEN_FAST) {
-                val += (id << 16) + idx;
+                val += (id << 16) + idx - r[2];
             }
 
             if wrd_idx == LAST_ROUND_COUNTER_INDEX {
-                val += (idx2 >> 2) + (idx2 << 24) + (idx << 12);
+                val = (val + (idx2 >> 2) + (idx2 << 24) + (idx << 12)) ^ r[3];
             }
 
             message[i - mod_start..i - mod_start + OCL_WORD_LEN]
@@ -155,6 +155,7 @@ impl MinerFunction for OclMinerFunction {
             .queue(queue.clone())
             .global_work_size(parallel)
             .arg_named("base_message", None::<&ocl::Buffer<u32>>)
+            .arg_named("params_in", None::<&ocl::Buffer<u32>>)
             .arg_named("params_out", None::<&ocl::Buffer<u32>>)
             .build()?;
 
@@ -192,6 +193,20 @@ impl MinerFunction for OclMinerFunction {
                 .copy_host_slice(message_words)
                 .build()?;
 
+            let params_in = [
+                rng.next_u32(),
+                rng.next_u32(),
+                rng.next_u32(),
+                rng.next_u32(),
+            ];
+
+            let params_in_buf = ocl::Buffer::<u32>::builder()
+                .queue(queue.clone())
+                .flags(ocl::flags::MEM_READ_ONLY)
+                .len(4)
+                .copy_host_slice(&params_in)
+                .build()?;
+
             const OCL_PARAMS_LEN : usize = 4 +
                 DEBUG_ENABLE * (OCL_MESSAGE_LEN + cpen442coin::MD5_HASH_LEN);
 
@@ -205,6 +220,7 @@ impl MinerFunction for OclMinerFunction {
                 .build()?;
 
             kernel.set_arg("base_message", &msg_buf)?;
+            kernel.set_arg("params_in", &params_in_buf)?;
             kernel.set_arg("params_out", &params_out_buf)?;
 
             unsafe { kernel.cmd().queue(&queue).enq()?; }
@@ -241,7 +257,7 @@ impl MinerFunction for OclMinerFunction {
                     previous_coin : (*previous_coin).clone(),
                     //blob : message_for_id(message_words, i as u32)
                     blob : message_for_id(&message, modifiable_start, modifiable_end,
-                        params_out[0], params_out[1], params_out[2])
+                        params_out[0], params_out[1], params_out[2], &params_in)
                 };
 
                 match tdata.coin_schan.send(coin) {

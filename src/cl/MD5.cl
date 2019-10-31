@@ -170,8 +170,10 @@ static inline void md5_round(uint* internal_state, const uint* message) {
  *
  */
 __kernel void md5(
-    // The base message (randomly generated)
+    // The base message to hash
     __constant uint* base_message,
+    // Extra random values
+    __constant uint* params_in,
     // The parameters output to the program
     // Note that many processing units may try to write to this location
     __global uint* params_out) {
@@ -180,6 +182,10 @@ __kernel void md5(
   const uint id = get_global_id(0);
   uint message[MESSAGE_LEN];
   uint zero_pad[16];
+  uint r0 = params_in[0];
+  uint r1 = params_in[1];
+  uint r2 = params_in[2];
+  uint r3 = params_in[3];
 
   // Set most significant bit of first pad byte
   zero_pad[0] = 0x80;
@@ -196,8 +202,8 @@ __kernel void md5(
     message[i] = base_message[i];
   }
 
-  uint orig0 = message[BLOB_INDEX + id % BLOB_LEN_FAST];
-  uint orig1 = message[BLOB_INDEX + (id + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST];
+  uint orig0 = message[BLOB_INDEX + (id + r0) % BLOB_LEN_FAST];
+  uint orig1 = message[BLOB_INDEX + (id + r1 + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST];
   uint orig2 = message[BLOB_INDEX + BLOB_LEN_FAST];
   uint orig3 = message[LAST_ROUND_COUNTER_INDEX];
 
@@ -212,9 +218,9 @@ __kernel void md5(
     md5_state[3] = 0x10325476;
 
     // Modify the message per iteration based on ID
-    message[BLOB_INDEX + id % BLOB_LEN_FAST] = orig0 + id + i * 4;
-    message[BLOB_INDEX + (id + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST] = orig1 ^ ((id << 16) | id);
-    message[BLOB_INDEX + BLOB_LEN_FAST] = orig2 + (id << 16) + i;
+    message[BLOB_INDEX + (id + r0) % BLOB_LEN_FAST] = orig0 + id + i * 4;
+    message[BLOB_INDEX + (id + r1 + BLOB_LEN_FAST / 4) % BLOB_LEN_FAST] = orig1 ^ ((id << 16) | id);
+    message[BLOB_INDEX + BLOB_LEN_FAST] = orig2 + (id << 16) + i - r2;
 
     // Perform MD5 till before the last round
     for (j = 0; j < MESSAGE_LEN / 16 - 1; ++j) {
@@ -228,7 +234,7 @@ __kernel void md5(
       md5_state_2[2] = md5_state[2];
       md5_state_2[3] = md5_state[3];
 
-      message[LAST_ROUND_COUNTER_INDEX] = orig3 + (j >> 2) + (j << 24) + (i << 12);
+      message[LAST_ROUND_COUNTER_INDEX] = (orig3 + (j >> 2) + (j << 24) + (i << 12)) ^ r3;
 
       // Perform the last 2 rounds of MD5
       md5_round(md5_state_2, &message[MESSAGE_LEN - 16]);
