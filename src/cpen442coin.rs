@@ -11,9 +11,9 @@ use openssl::hash;
 use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
 use crate::util::Timer;
 use std::thread;
-use std::ops::DerefMut;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::collections::VecDeque;
+use atomic_option::AtomicOption;
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
@@ -27,7 +27,8 @@ pub struct Tracker {
     miner_id : String,
     last_coin_thread : Option<thread::JoinHandle<()>>,
     data : Arc<TrackerData>,
-    last_coin : Arc<Mutex<String>>,
+    last_coin : Arc<AtomicOption<String>>,
+    last_coin_loc : Option<String>,
     last_coin_url : &'static str,
     claim_coin_url : &'static str,
     fake_last_coin : Option<String>
@@ -95,7 +96,8 @@ impl Tracker {
             miner_id,
             data,
             last_coin_thread : None,
-            last_coin : Arc::from(Mutex::from(String::new())),
+            last_coin : Arc::from(AtomicOption::empty()),
+            last_coin_loc : None,
             last_coin_url : LAST_COIN_URL,
             claim_coin_url : CLAIM_COIN_URL,
             fake_last_coin : None
@@ -164,22 +166,29 @@ impl Tracker {
             Ok(fake_coin.clone())
         } else {
             assert!(self.last_coin_thread.is_some());
-            {
-                let mut reqs = self.data.client_reqs.lock().unwrap();
-                Self::client_check_reqs(&mut reqs);
+            loop {
+                if let Some(v) = self.last_coin.take(Ordering::Relaxed) {
+                    self.last_coin_loc = Some((*v).clone());
+                    return Ok(*v);
+                }
 
-                if reqs.len() < 4 {
-                    reqs.push_front(Instant::now());
-                    std::mem::drop(reqs);
+                let mut get = false;
+                {
+                    let mut reqs = self.data.client_reqs.lock().unwrap();
+                    Self::client_check_reqs(&mut reqs);
 
+                    if reqs.len() < 4 {
+                        reqs.push_front(Instant::now());
+                        get = true;
+                    }
+                }
+
+                if get {
                     match Self::get_last_coin_c(self.claim_coin_url, &self.data.client) {
                         Ok(coin) => {
                             if coin.len() == MD5_HASH_HEX_LEN {
                                 if let Ok(_) = hex::decode(&coin) {
-                                    let mut coin_cpy = coin.clone();
-                                    let mut l = self.last_coin.lock().unwrap();
-
-                                    std::mem::swap(l.deref_mut(), &mut coin_cpy);
+                                    self.last_coin_loc = Some(coin.clone());
 
                                     return Ok(coin);
                                 }
@@ -188,16 +197,9 @@ impl Tracker {
                         Err(_) => {},
                     }
                 }
-            }
 
-            loop {
-                {
-                    let v = self.last_coin.lock().unwrap();
-
-                    // Need to wait for the first coin to be fetched
-                    if v.len() > 0 {
-                        return Ok(v.clone());
-                    }
+                if let Some(v) = &self.last_coin_loc {
+                    return Ok(v.clone());
                 }
 
                 thread::sleep(Duration::from_millis(25));
@@ -207,7 +209,7 @@ impl Tracker {
 
     fn get_last_coin_thread(url : String,
         data: Arc<TrackerData>,
-        coin_ptr: Arc<Mutex<String>>,
+        coin_ptr: Arc<AtomicOption<String>>,
         poll_ms: u32) {
 
         let mut coin_changed_timer = Timer::new(Duration::from_secs(30));
@@ -219,15 +221,12 @@ impl Tracker {
                     std::cmp::min(4, data.proxyclients.len())) {
 
                     match Self::get_last_coin_c(&url, proxyc) {
-                        Ok(mut coin) => {
+                        Ok(coin) => {
                             if coin.len() == MD5_HASH_HEX_LEN {
                                 if let Ok(_) = hex::decode(&coin) {
-                                    let mut l = coin_ptr.lock().unwrap();
-
-                                    std::mem::swap(l.deref_mut(), &mut coin);
+                                    coin_ptr.replace(Some(Box::new(coin)), Ordering::Relaxed);
 
                                     coin_changed_timer.reset();
-                                    break;
                                 }
                             }
                         },

@@ -6,7 +6,7 @@ opts=(
     --cl-device 0
     --ncpu 2
     --poll-ms 750
-    -o wallet2.txt
+    -o wallet3.txt
     "$@"
     --proxy http://51.79.30.32:8080
     --proxy http://51.79.24.191:8080
