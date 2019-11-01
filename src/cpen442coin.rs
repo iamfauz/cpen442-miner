@@ -11,7 +11,7 @@ use openssl::hash;
 use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
 use crate::util::Timer;
 use std::thread;
-use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::sync::{Arc, atomic::Ordering};
 use std::collections::VecDeque;
 use atomic_option::AtomicOption;
 
@@ -31,12 +31,12 @@ pub struct Tracker {
     last_coin_loc : Option<String>,
     last_coin_url : &'static str,
     claim_coin_url : &'static str,
-    fake_last_coin : Option<String>
+    fake_last_coin : Option<String>,
+    client : Client,
+    client_reqs : VecDeque<Instant>,
 }
 
 struct TrackerData {
-    client : Client,
-    client_reqs : Mutex<VecDeque<Instant>>,
     proxyclients : Vec<Client>,
 }
 
@@ -87,8 +87,6 @@ impl Tracker {
         }
 
         let data = Arc::from(TrackerData {
-            client,
-            client_reqs : Mutex::default(),
             proxyclients,
         });
 
@@ -100,7 +98,9 @@ impl Tracker {
             last_coin_loc : None,
             last_coin_url : LAST_COIN_URL,
             claim_coin_url : CLAIM_COIN_URL,
-            fake_last_coin : None
+            fake_last_coin : None,
+            client,
+            client_reqs : VecDeque::new(),
         })
     }
 
@@ -172,19 +172,10 @@ impl Tracker {
                     return Ok(*v);
                 }
 
-                let mut get = false;
-                {
-                    let mut reqs = self.data.client_reqs.lock().unwrap();
-                    Self::client_check_reqs(&mut reqs);
-
-                    if reqs.len() < 4 {
-                        reqs.push_front(Instant::now());
-                        get = true;
-                    }
-                }
-
-                if get {
-                    match Self::get_last_coin_c(self.claim_coin_url, &self.data.client) {
+                Self::client_check_reqs(&mut self.client_reqs);
+                if self.client_reqs.len() < 4 {
+                    self.client_reqs.push_front(Instant::now());
+                    match Self::get_last_coin_c(self.claim_coin_url, &self.client) {
                         Ok(coin) => {
                             if coin.len() == MD5_HASH_HEX_LEN {
                                 if let Ok(_) = hex::decode(&coin) {
@@ -294,22 +285,16 @@ impl Tracker {
                 hash_of_last_coin : previous_coin,
             };
 
-            {
-                let mut reqs = self.data.client_reqs.lock().unwrap();
-                Self::client_check_reqs(&mut reqs);
-
-                if reqs.len() < 6 {
-                    reqs.push_front(Instant::now());
-                    std::mem::drop(reqs);
-
-                    match Self::claim_coin_c(self.claim_coin_url, &self.data.client, &req) {
-                        Ok(_) => return Ok(()),
-                        Err(e) => {
-                            if Self::err_is_fatal(&e) {
-                                return Err(e);
-                            }
-                        },
-                    }
+            Self::client_check_reqs(&mut self.client_reqs);
+            if self.client_reqs.len() < 6 {
+                self.client_reqs.push_front(Instant::now());
+                match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        if Self::err_is_fatal(&e) {
+                            return Err(e);
+                        }
+                    },
                 }
             }
 
