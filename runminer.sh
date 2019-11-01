@@ -3,6 +3,10 @@
 miner=target/release/miner
 
 opts=(
+    --cl-device 0
+    --ncpu 2
+    --poll-ms 1000
+    -o wallet2.txt
     "$@"
     --proxy http://51.79.30.32:8080
     --proxy http://51.79.24.191:8080
@@ -28,4 +32,4 @@ opts=(
     --proxy http://198.199.85.139:3128
     --proxy http://50.206.9.153:80
 )
-"$miner" "${opts[@]}"
+nice -n -5 "$miner" "${opts[@]}"

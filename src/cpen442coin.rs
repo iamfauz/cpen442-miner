@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::error::Error;
 use openssl::hash;
 use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
+use crate::util::Timer;
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
@@ -23,6 +24,7 @@ pub struct Tracker {
     proxyclients : Vec<Client>,
     last_coin_url : &'static str,
     claim_coin_url : &'static str,
+    claim_coin_timer : Timer,
     fake_last_coin : Option<String>
 }
 
@@ -62,7 +64,7 @@ impl Tracker {
             println!("HTTP Proxy: {}", proxy);
 
             let proxyc = Client::builder()
-                .timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(2))
                 .gzip(false) 
                 .proxy(Proxy::http(&proxy)?)
                 .build()?;
@@ -76,6 +78,7 @@ impl Tracker {
             proxyclients,
             last_coin_url : LAST_COIN_URL,
             claim_coin_url : CLAIM_COIN_URL,
+            claim_coin_timer : Timer::new(Duration::from_millis(2000)),
             fake_last_coin : None
         })
     }
@@ -183,47 +186,28 @@ impl Tracker {
                 id_of_miner: self.miner_id.clone(),
             };
 
+            if self.claim_coin_timer.check_and_reset() {
+                match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
+                    Ok(_) => return Ok(()),
+                    Err(e) => {
+                        if Self::err_is_fatal(&e) {
+                            return Err(e);
+                        }
+                    },
+                }
+            }
+
             for proxyc in self.proxyclients.choose_multiple(&mut OsRng,
                 std::cmp::min(self.proxyclients.len(), 2)) {
 
                 match Self::claim_coin_c(self.claim_coin_url, proxyc, &req) {
                     Ok(_) => return Ok(()),
                     Err(e) => {
-                        match &e {
-                            Error::Request(re) => {
-                                if re.is_timeout() {
-                                    continue;
-                                }
-
-                                if let Some(code) = re.status() {
-                                    if code.as_u16() != 429 {
-                                        return Err(e);
-                                    }
-                                } else {
-                                    return Err(e);
-                                }
-                            },
-                            _ => return Err(e)
+                        if Self::err_is_fatal(&e) {
+                            return Err(e);
                         }
                     },
                 }
-            }
-
-            match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    if let Error::Request(re) = &e {
-                        if let Some(code) = re.status() {
-                            if code.as_u16() != 429 {
-                                return Err(e);
-                            }
-                        } else {
-                            return Err(e);
-                        }
-                    } else {
-                        return Err(e);
-                    }
-                },
             }
 
             Err(Error::new("Claim Coin All Requests Failed".into()))
@@ -251,6 +235,27 @@ impl Tracker {
         } else {
             Err(Error::new(format!("Claim Coin failed Http {}: {}",
                         code.as_u16(), code.canonical_reason().unwrap_or(""))))
+        }
+    }
+
+    fn err_is_fatal(e: &Error) -> bool {
+        match e {
+            Error::Request(re) => {
+                if re.is_timeout() {
+                    return false;
+                }
+
+                if let Some(code) = re.status() {
+                    if code.as_u16() != 429 {
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
+            },
+            _ => true
         }
     }
 }
