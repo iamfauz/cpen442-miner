@@ -5,13 +5,15 @@ use base64;
 use reqwest::Client;
 use reqwest::Proxy;
 use serde::{Serialize, Deserialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use crate::error::Error;
 use openssl::hash;
 use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
 use crate::util::Timer;
 use std::thread;
+use std::ops::DerefMut;
 use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
@@ -28,12 +30,12 @@ pub struct Tracker {
     last_coin : Arc<Mutex<String>>,
     last_coin_url : &'static str,
     claim_coin_url : &'static str,
-    claim_coin_timer : Timer,
     fake_last_coin : Option<String>
 }
 
 struct TrackerData {
     client : Client,
+    client_reqs : Mutex<VecDeque<Instant>>,
     proxyclients : Vec<Client>,
 }
 
@@ -85,6 +87,7 @@ impl Tracker {
 
         let data = Arc::from(TrackerData {
             client,
+            client_reqs : Mutex::default(),
             proxyclients,
         });
 
@@ -95,7 +98,6 @@ impl Tracker {
             last_coin : Arc::from(Mutex::from(String::new())),
             last_coin_url : LAST_COIN_URL,
             claim_coin_url : CLAIM_COIN_URL,
-            claim_coin_timer : Timer::new(Duration::from_millis(2000)),
             fake_last_coin : None
         })
     }
@@ -144,11 +146,50 @@ impl Tracker {
         &self.miner_id
     }
 
+    fn client_check_reqs(reqs: &mut VecDeque<Instant>) {
+        loop {
+            if let Some(t) = reqs.back() {
+                if t.elapsed().as_millis() > 60000 {
+                    reqs.pop_back();
+                    continue;
+                }
+            }
+
+            break;
+        }
+    }
+
     pub fn get_last_coin(&mut self) -> Result<CoinHash, Error> {
         if let Some(fake_coin) = &self.fake_last_coin {
             Ok(fake_coin.clone())
         } else {
             assert!(self.last_coin_thread.is_some());
+            {
+                let mut reqs = self.data.client_reqs.lock().unwrap();
+                Self::client_check_reqs(&mut reqs);
+
+                if reqs.len() < 4 {
+                    reqs.push_front(Instant::now());
+                    std::mem::drop(reqs);
+
+                    match Self::get_last_coin_c(self.claim_coin_url, &self.data.client) {
+                        Ok(coin) => {
+                            if coin.len() == MD5_HASH_HEX_LEN {
+                                if let Ok(_) = hex::decode(&coin) {
+                                    let mut coin_cpy = coin.clone();
+                                    let mut l = self.last_coin.lock().unwrap();
+
+                                    std::mem::swap(l.deref_mut(), &mut coin_cpy);
+
+                                    return Ok(coin);
+                                }
+                            }
+                        },
+                        Err(_) => {},
+                    }
+                }
+            }
+
             loop {
                 {
                     let v = self.last_coin.lock().unwrap();
@@ -159,7 +200,7 @@ impl Tracker {
                     }
                 }
 
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_millis(25));
             }
         }
     }
@@ -168,34 +209,38 @@ impl Tracker {
         data: Arc<TrackerData>,
         coin_ptr: Arc<Mutex<String>>,
         poll_ms: u32) {
-        use std::ops::DerefMut;
-        use std::mem::swap;
 
         let mut coin_changed_timer = Timer::new(Duration::from_secs(30));
+        let mut poll_timer = Timer::new(Duration::from_millis(poll_ms.into()));
 
         loop {
-            for proxyc in data.proxyclients.choose(&mut OsRng) {
-                match Self::get_last_coin_c(&url, proxyc) {
-                    Ok(mut coin) => {
-                        if coin.len() == MD5_HASH_HEX_LEN {
-                            if let Ok(_) = hex::decode(&coin) {
-                                let mut l = coin_ptr.lock().unwrap();
+            if poll_timer.check_and_reset() {
+                for proxyc in data.proxyclients.choose_multiple(&mut OsRng,
+                    std::cmp::min(4, data.proxyclients.len())) {
 
-                                swap(l.deref_mut(), &mut coin);
+                    match Self::get_last_coin_c(&url, proxyc) {
+                        Ok(mut coin) => {
+                            if coin.len() == MD5_HASH_HEX_LEN {
+                                if let Ok(_) = hex::decode(&coin) {
+                                    let mut l = coin_ptr.lock().unwrap();
 
-                                coin_changed_timer.reset();
+                                    std::mem::swap(l.deref_mut(), &mut coin);
+
+                                    coin_changed_timer.reset();
+                                    break;
+                                }
                             }
-                        }
-                    },
-                    Err(_) => {},
+                        },
+                        Err(_) => {},
+                    }
+                }
+
+                if coin_changed_timer.check_and_reset() {
+                    println!("\nWarning: Last coin has not changed in over 30s");
                 }
             }
 
-            if coin_changed_timer.check_and_reset() {
-                println!("\nWarning: Last coin has not changed in over 30s");
-            }
-
-            thread::sleep(Duration::from_millis(poll_ms.into()));
+            thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -250,14 +295,22 @@ impl Tracker {
                 hash_of_last_coin : previous_coin,
             };
 
-            if self.claim_coin_timer.check_and_reset() {
-                match Self::claim_coin_c(self.claim_coin_url, &self.data.client, &req) {
-                    Ok(_) => return Ok(()),
-                    Err(e) => {
-                        if Self::err_is_fatal(&e) {
-                            return Err(e);
-                        }
-                    },
+            {
+                let mut reqs = self.data.client_reqs.lock().unwrap();
+                Self::client_check_reqs(&mut reqs);
+
+                if reqs.len() < 6 {
+                    reqs.push_front(Instant::now());
+                    std::mem::drop(reqs);
+
+                    match Self::claim_coin_c(self.claim_coin_url, &self.data.client, &req) {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            if Self::err_is_fatal(&e) {
+                                return Err(e);
+                            }
+                        },
+                    }
                 }
             }
 
@@ -292,12 +345,16 @@ impl Tracker {
 
             use ClaimCoinResp::*;
             match response {
+                Success { success : _ } => Ok(()),
                 Fail { fail } => Err(Error::new(
                         format!("Claim Coin failed with error: {}", fail))),
-                        Success { success : _ } => Ok(())
             }
         } else if code.as_u16() == 400 {
-            Err(Error::BadCoin)
+            if let Ok(ClaimCoinResp::Fail { fail }) = response.json() {
+                Err(Error::BadCoin(fail))
+            } else {
+                Err(Error::BadCoin("".into()))
+            }
         } else if code.as_u16() == 429 {
             Err(Error::ServerBusy)
         } else {
@@ -308,7 +365,7 @@ impl Tracker {
 
     fn err_is_fatal(e: &Error) -> bool {
         match e {
-            Error::BadCoin => true,
+            Error::BadCoin(_) => true,
             Error::Request(re) => {
                 if re.is_timeout() {
                     return false;

@@ -178,10 +178,9 @@ impl MiningManager {
         let mut claim_now = false;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(500));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(1000));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
         let mut stop_miner_timer = Timer::new(Duration::from_secs(48));
-        let mut too_many_req_timer = Timer::new(Duration::from_secs(24));
         let mut claim_coin_timer = Timer::new(Duration::from_millis(1000));
 
         let mut coin_count : u64 = 0;
@@ -258,9 +257,7 @@ impl MiningManager {
                         self.update_miners(&last_coin);
                     },
                     Err(e) => {
-                        if too_many_req_timer.check_and_reset() {
-                            term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
-                        }
+                        term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
                     }
                 };
 
@@ -300,12 +297,13 @@ impl MiningManager {
                                 false
                             },
                             Err(e) => {
-                                if let Error::BadCoin = e {
-                                    return false;
-                                }
-
                                 term.write_line(&format!("Failed to claim coin: {:?}", e)).unwrap();
-                                true
+
+                                if let Error::BadCoin(_) = e {
+                                    false
+                                } else {
+                                    true
+                                }
                             }
                         }
                     } else {
