@@ -12,7 +12,8 @@ use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
 use crate::util::Timer;
 use std::thread;
 use std::sync::{Arc, atomic::Ordering};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
+use std::iter::FromIterator;
 use atomic_option::AtomicOption;
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
@@ -73,6 +74,7 @@ impl Tracker {
             .gzip(false)
             .build()?;
 
+        let proxies : HashSet<String> = HashSet::from_iter(proxies.iter().cloned());
         let mut proxyclients = Vec::new();
         for proxy in proxies {
             println!("HTTP Proxy: {}", proxy);
@@ -253,7 +255,15 @@ impl Tracker {
         }
     }
 
-    pub fn claim_coin(&mut self, blob: Vec<u8>, previous_coin: String) -> Result<(), Error> {
+    pub fn claim_coin(&mut self,
+        blob: Vec<u8>,
+        previous_coin: String,
+        hash: &str) -> Result<(), Error> {
+
+        if hash[0..8] != *"00000000" {
+            return Err(Error::BadCoin("Prefix is not zero".into()));
+        }
+
         if let Some(fake_coin) = &self.fake_last_coin {
             if *fake_coin != previous_coin {
                 return Err(Error::new("Previous coin does not match!".into()));
@@ -279,6 +289,7 @@ impl Tracker {
                             h_hex, hex::encode(msg))))
             }
         } else {
+
             let req = ClaimCoinReq {
                 coin_blob: base64::encode(&blob),
                 id_of_miner: self.miner_id.clone(),
@@ -289,7 +300,10 @@ impl Tracker {
             if self.client_reqs.len() < 6 {
                 self.client_reqs.push_front(Instant::now());
                 match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
-                    Ok(_) => return Ok(()),
+                    Ok(_) => {
+                        self.last_coin_loc = Some(String::from(hash));
+                        return Ok(())
+                    },
                     Err(e) => {
                         if Self::err_is_fatal(&e) {
                             return Err(e);
@@ -302,7 +316,10 @@ impl Tracker {
                 std::cmp::min(self.data.proxyclients.len(), 2)) {
 
                 match Self::claim_coin_c(self.claim_coin_url, proxyc, &req) {
-                    Ok(_) => return Ok(()),
+                    Ok(_) => {
+                        self.last_coin_loc = Some(String::from(hash));
+                        return Ok(())
+                    },
                     Err(e) => {
                         if Self::err_is_fatal(&e) {
                             return Err(e);
