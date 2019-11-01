@@ -11,6 +11,8 @@ pub enum Error {
     OpenCL(ocl::Error),
     Hex(FromHexError),
     Io(io::Error),
+    BadCoin,
+    ServerBusy,
     Msg(String)
 }
 

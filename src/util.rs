@@ -22,5 +22,9 @@ impl Timer {
             false
         }
     }
+
+    pub fn reset(&mut self) {
+        self.start = Instant::now();
+    }
 }
 

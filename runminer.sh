@@ -5,7 +5,7 @@ miner=target/release/miner
 opts=(
     --cl-device 0
     --ncpu 2
-    --poll-ms 1000
+    --poll-ms 750
     -o wallet2.txt
     "$@"
     --proxy http://51.79.30.32:8080

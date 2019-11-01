@@ -158,7 +158,7 @@ impl MiningManager {
 
         term.write_line(&format!("\nTrying to claim coin with hash: {}", h)).unwrap();
 
-        match self.tracker.claim_coin(coin.blob.clone()) {
+        match self.tracker.claim_coin(coin.blob.clone(), coin.previous_coin.clone()) {
             Ok(_) => {
                 Ok(h)
             },
@@ -170,6 +170,7 @@ impl MiningManager {
 
     pub fn run(&mut self, wallet : &mut Option<Wallet>) -> Result<(), Error> {
         let term = Term::stderr();
+        self.tracker.start_last_coin_thread(self.poll_ms);
         let mut last_coin = self.tracker.get_last_coin()?;
         let mut last_last_coin = last_coin.clone();
         let mut coins_to_claim = VecDeque::new();
@@ -177,7 +178,7 @@ impl MiningManager {
         let mut claim_now = false;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(self.poll_ms.into()));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(500));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
         let mut stop_miner_timer = Timer::new(Duration::from_secs(48));
         let mut too_many_req_timer = Timer::new(Duration::from_secs(24));
@@ -299,12 +300,8 @@ impl MiningManager {
                                 false
                             },
                             Err(e) => {
-                                if let Error::Request(re) = &e {
-                                    if let Some(code) = re.status() {
-                                        if code.as_u16() == 400 {
-                                            return false;
-                                        }
-                                    }
+                                if let Error::BadCoin = e {
+                                    return false;
                                 }
 
                                 term.write_line(&format!("Failed to claim coin: {:?}", e)).unwrap();
