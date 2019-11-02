@@ -189,7 +189,7 @@ impl Tracker {
 
         loop {
             if poll_timer.check_and_reset() {
-                for mut proxyc in proxy_manager.get_clients(6) {
+                for mut proxyc in proxy_manager.get_clients(8) {
                     let proxyc = proxyc.proxy_client().access();
                     match Self::get_last_coin_c(&url, proxyc.client()) {
                         Ok(coin) => {
@@ -303,7 +303,7 @@ impl Tracker {
                 }
             }
 
-            for mut proxyc in self.proxy_manager.get_clients(4) {
+            for mut proxyc in self.proxy_manager.get_clients(6) {
                 let proxyc = proxyc.proxy_client().access();
                 match Self::claim_coin_c(self.claim_coin_url, proxyc.client(), &req) {
                     Ok(_) => {

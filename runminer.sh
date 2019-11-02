@@ -6,7 +6,7 @@ opts=(
     --cl-device 0
     --ncpu 2
     --poll-ms 400
-    -o wallet4.txt
+    -o wallet5.txt
     "$@"
     --proxy-file proxy.txt
 )
