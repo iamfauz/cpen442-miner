@@ -14,6 +14,7 @@ mod cpuminer;
 mod ocldevice;
 mod cryptowallet;
 mod util;
+mod proxy;
 
 use error::Error;
 
@@ -65,8 +66,8 @@ struct MinerOpts {
     wallet : Option<PathBuf>,
 
     /// HTTP Proxies to use
-    #[structopt(long = "proxy")]
-    http_proxies : Option<Vec<String>>,
+    #[structopt(long = "proxy-file", parse(from_os_str))]
+    http_proxies : Option<PathBuf>,
 
     /// How often to poll last_coin in milliseconds
     #[structopt(long = "poll-ms", default_value = "6000")]
@@ -119,7 +120,7 @@ fn main() -> Result<(), Error> {
         tracker = cpen442coin::Tracker::new_fake(identity.clone())?;
     } else {
         tracker = cpen442coin::Tracker::new(identity.clone(),
-            opt.http_proxies.unwrap_or(Vec::new()))?;
+            opt.http_proxies.unwrap_or(PathBuf::new()))?;
 
         if let Some(wallet_path) = opt.wallet {
             println!("Wallet Path: {:?}", wallet_path);

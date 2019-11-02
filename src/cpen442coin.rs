@@ -3,17 +3,17 @@
 //!
 use base64;
 use reqwest::Client;
-use reqwest::Proxy;
+use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
 use std::time::{Duration, Instant};
 use crate::error::Error;
+use crate::proxy::ProxyManager;
 use openssl::hash;
-use rand::{RngCore, rngs::OsRng, seq::SliceRandom};
+use rand::{RngCore, rngs::OsRng};
 use crate::util::Timer;
 use std::thread;
 use std::sync::{Arc, atomic::Ordering};
-use std::collections::{VecDeque, HashSet};
-use std::iter::FromIterator;
+use std::collections::VecDeque;
 use atomic_option::AtomicOption;
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
@@ -27,7 +27,7 @@ pub type CoinHash = String;
 pub struct Tracker {
     miner_id : String,
     last_coin_thread : Option<thread::JoinHandle<()>>,
-    data : Arc<TrackerData>,
+    proxy_manager : Arc<ProxyManager>,
     last_coin : Arc<AtomicOption<String>>,
     last_coin_loc : Option<String>,
     last_coin_url : &'static str,
@@ -35,10 +35,6 @@ pub struct Tracker {
     fake_last_coin : Option<String>,
     client : Client,
     client_reqs : VecDeque<Instant>,
-}
-
-struct TrackerData {
-    proxyclients : Vec<Client>,
 }
 
 #[derive(Deserialize)]
@@ -68,33 +64,15 @@ const CLAIM_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/claim_coin";
 const VERIFY_EXAMPLE_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/verify_example_coin";
 
 impl Tracker {
-    pub fn new(miner_id: String, proxies : Vec<String>) -> Result<Tracker, Error> {
+    pub fn new(miner_id: String, proxy_file : PathBuf) -> Result<Tracker, Error> {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .gzip(false)
             .build()?;
 
-        let proxies : HashSet<String> = HashSet::from_iter(proxies.iter().cloned());
-        let mut proxyclients = Vec::new();
-        for proxy in proxies {
-            println!("HTTP Proxy: {}", proxy);
-
-            let proxyc = Client::builder()
-                .timeout(Duration::from_secs(5))
-                .gzip(false) 
-                .proxy(Proxy::http(&proxy)?)
-                .build()?;
-
-            proxyclients.push(proxyc);
-        }
-
-        let data = Arc::from(TrackerData {
-            proxyclients,
-        });
-
         Ok(Tracker {
             miner_id,
-            data,
+            proxy_manager : Arc::new(ProxyManager::new(proxy_file)?),
             last_coin_thread : None,
             last_coin : Arc::from(AtomicOption::empty()),
             last_coin_loc : None,
@@ -119,7 +97,7 @@ impl Tracker {
 
         let fake_last_coin = hex::encode(&fake_last_coin[..]);
 
-        let mut t = Self::new(miner_id, Vec::new())?;
+        let mut t = Self::new(miner_id, PathBuf::new())?;
         t.last_coin_url = "FAKE";
         t.claim_coin_url = "FAKE";
         t.fake_last_coin = Some(fake_last_coin);
@@ -129,7 +107,7 @@ impl Tracker {
 
     #[allow(dead_code)]
     pub fn new_verify(miner_id: String) -> Result<Tracker, Error> {
-        let mut t = Self::new(miner_id, Vec::new())?;
+        let mut t = Self::new(miner_id, PathBuf::new())?;
 
         t.claim_coin_url = VERIFY_EXAMPLE_COIN_URL;
 
@@ -138,11 +116,11 @@ impl Tracker {
 
     pub fn start_last_coin_thread(&mut self, poll_ms: u32) {
         let url = String::from(self.last_coin_url);
-        let data = self.data.clone();
+        let proxy_manager = self.proxy_manager.clone();
         let coin = self.last_coin.clone();
 
         self.last_coin_thread = Some(thread::spawn(move || {
-            Self::get_last_coin_thread(url, data, coin, poll_ms);
+            Self::get_last_coin_thread(url, proxy_manager, coin, poll_ms);
         }));
     }
 
@@ -201,20 +179,21 @@ impl Tracker {
     }
 
     fn get_last_coin_thread(url : String,
-        data: Arc<TrackerData>,
+        proxy_manager: Arc<ProxyManager>,
         coin_ptr: Arc<AtomicOption<String>>,
         poll_ms: u32) {
 
         let mut coin_changed_timer = Timer::new(Duration::from_secs(30));
         let mut poll_timer = Timer::new(Duration::from_millis(poll_ms.into()));
+        let mut proxy_refresh_timer = Timer::new(Duration::from_secs(60));
 
         loop {
             if poll_timer.check_and_reset() {
-                for proxyc in data.proxyclients.choose_multiple(&mut OsRng,
-                    std::cmp::min(4, data.proxyclients.len())) {
-
-                    match Self::get_last_coin_c(&url, proxyc) {
+                for mut proxyc in proxy_manager.get_clients(6) {
+                    let proxyc = proxyc.proxy_client().access();
+                    match Self::get_last_coin_c(&url, proxyc.client()) {
                         Ok(coin) => {
+                            proxyc.success();
                             if coin.len() == MD5_HASH_HEX_LEN {
                                 if let Ok(_) = hex::decode(&coin) {
                                     coin_ptr.replace(Some(Box::new(coin)), Ordering::Relaxed);
@@ -223,8 +202,18 @@ impl Tracker {
                                 }
                             }
                         },
-                        Err(_) => {},
+                        Err(e) => {
+                            if ! Self::err_is_fatal(&e) {
+                                proxyc.success();
+                            }
+                        },
                     }
+                }
+
+                if proxy_refresh_timer.check_and_reset() {
+                    proxy_manager.read_new_proxies().unwrap_or_else(|e| {
+                        println!("Failed to read new proxies: {:?}", e);
+                    });
                 }
 
                 if coin_changed_timer.check_and_reset() {
@@ -249,6 +238,8 @@ impl Tracker {
             let response : LastCoinResp = response.json()?;
 
             Ok(response.coin_id)
+        } else if code.as_u16() == 400 || code.as_u16() == 429 || code.as_u16() == 409 {
+            Err(Error::ServerBusy)
         } else {
             Err(Error::new(format!("Get Last Coin Failed Http {}: {}",
                         code.as_u16(), code.canonical_reason().unwrap_or(""))))
@@ -312,17 +303,23 @@ impl Tracker {
                 }
             }
 
-            for proxyc in self.data.proxyclients.choose_multiple(&mut OsRng,
-                std::cmp::min(self.data.proxyclients.len(), 2)) {
-
-                match Self::claim_coin_c(self.claim_coin_url, proxyc, &req) {
+            for mut proxyc in self.proxy_manager.get_clients(4) {
+                let proxyc = proxyc.proxy_client().access();
+                match Self::claim_coin_c(self.claim_coin_url, proxyc.client(), &req) {
                     Ok(_) => {
+                        proxyc.success();
                         self.last_coin_loc = Some(String::from(hash));
                         return Ok(())
                     },
                     Err(e) => {
                         if Self::err_is_fatal(&e) {
+                            if let Error::BadCoin(_) = &e {
+                                proxyc.success();
+                            }
+
                             return Err(e);
+                        } else {
+                            proxyc.success();
                         }
                     },
                 }
@@ -356,7 +353,7 @@ impl Tracker {
             } else {
                 Err(Error::BadCoin("".into()))
             }
-        } else if code.as_u16() == 429 {
+        } else if code.as_u16() == 429 || code.as_u16() == 409 {
             Err(Error::ServerBusy)
         } else {
             Err(Error::new(format!("Claim Coin failed Http {}: {}",
@@ -373,7 +370,7 @@ impl Tracker {
                 }
 
                 if let Some(code) = re.status() {
-                    if code.as_u16() != 429 {
+                    if code.as_u16() != 429 && code.as_u16() != 409 {
                         true
                     } else {
                         false

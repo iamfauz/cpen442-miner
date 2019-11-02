@@ -142,7 +142,7 @@ impl MiningManager {
         let mut last_coin = self.tracker.get_last_coin()?;
 
         let start_time = SystemTime::now();
-        let mut coin_check_timer = Timer::new(Duration::from_millis(1000));
+        let mut coin_check_timer = Timer::new(Duration::from_millis(self.poll_ms.into()));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
 
         let mut coin_count : u64 = 0;
