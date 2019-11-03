@@ -13,6 +13,7 @@ pub enum Error {
     Io(io::Error),
     BadCoin(String),
     ServerBusy,
+    AllRequestsFailed(String),
     Msg(String)
 }
 

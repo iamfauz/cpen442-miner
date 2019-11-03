@@ -115,13 +115,15 @@ impl Tracker {
     }
 
     pub fn start_last_coin_thread(&mut self, poll_ms: u32) {
-        let url = String::from(self.last_coin_url);
-        let proxy_manager = self.proxy_manager.clone();
-        let coin = self.last_coin.clone();
+        if let None = &self.fake_last_coin {
+            let url = String::from(self.last_coin_url);
+            let proxy_manager = self.proxy_manager.clone();
+            let coin = self.last_coin.clone();
 
-        self.last_coin_thread = Some(thread::spawn(move || {
-            Self::get_last_coin_thread(url, proxy_manager, coin, poll_ms);
-        }));
+            self.last_coin_thread = Some(thread::spawn(move || {
+                Self::get_last_coin_thread(url, proxy_manager, coin, poll_ms);
+            }));
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -153,7 +155,7 @@ impl Tracker {
                 }
 
                 Self::client_check_reqs(&mut self.client_reqs);
-                if self.client_reqs.len() < 4 {
+                if self.client_reqs.len() < 5 {
                     self.client_reqs.push_front(Instant::now());
                     match Self::get_last_coin_c(self.claim_coin_url, &self.client) {
                         Ok(coin) => {
@@ -186,9 +188,13 @@ impl Tracker {
         let mut coin_changed_timer = Timer::new(Duration::from_secs(30));
         let mut poll_timer = Timer::new(Duration::from_millis(poll_ms.into()));
         let mut proxy_refresh_timer = Timer::new(Duration::from_secs(60));
+        let mut print_error_timer = Timer::new(Duration::from_secs(30));
+
+        let mut fail_count = 0;
 
         loop {
             if poll_timer.check_and_reset() {
+                let mut last_e = None;
                 for mut proxyc in proxy_manager.get_clients(8) {
                     let proxyc = proxyc.proxy_client().access();
                     match Self::get_last_coin_c(&url, proxyc.client()) {
@@ -199,6 +205,9 @@ impl Tracker {
                                     coin_ptr.replace(Some(Box::new(coin)), Ordering::Relaxed);
 
                                     coin_changed_timer.reset();
+                                    last_e = None;
+                                    fail_count = 0;
+                                    break;
                                 }
                             }
                         },
@@ -206,8 +215,29 @@ impl Tracker {
                             if ! Self::err_is_fatal(&e) {
                                 proxyc.success();
                             }
+                            
+                            last_e = Some(e);
                         },
                     }
+                }
+
+                if let Some(e) = last_e {
+                    fail_count += 1;
+
+                    if print_error_timer.check_and_reset() {
+                        println!("Get Last Coin Thread Error: {:?}", e);
+
+                        print_error_timer.reset();
+                    }
+
+                    if fail_count > 5 {
+                        println!("Throttling last coin thread due to too many errors: {:?}", e);
+                        thread::sleep(Duration::from_secs(10));
+                        fail_count = 0;
+                    }
+
+                    // Limit the retry rate
+                    poll_timer.reset();
                 }
 
                 if proxy_refresh_timer.check_and_reset() {
@@ -288,7 +318,7 @@ impl Tracker {
             };
 
             Self::client_check_reqs(&mut self.client_reqs);
-            if self.client_reqs.len() < 6 {
+            if self.client_reqs.len() < 10 {
                 self.client_reqs.push_front(Instant::now());
                 match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
                     Ok(_) => {
@@ -303,6 +333,7 @@ impl Tracker {
                 }
             }
 
+            let mut last_e = Error::new("No Clients".into());
             for mut proxyc in self.proxy_manager.get_clients(6) {
                 let proxyc = proxyc.proxy_client().access();
                 match Self::claim_coin_c(self.claim_coin_url, proxyc.client(), &req) {
@@ -321,11 +352,12 @@ impl Tracker {
                         } else {
                             proxyc.success();
                         }
+                        last_e = e;
                     },
                 }
             }
 
-            Err(Error::new("Claim Coin All Requests Failed".into()))
+            Err(Error::AllRequestsFailed(format!("All Requests Failed: {:?}", last_e)))
         }
     }
 

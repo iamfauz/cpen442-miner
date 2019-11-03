@@ -13,7 +13,7 @@ use crate::{
 use openssl::hash::{Hasher, MessageDigest};
 use console::Term;
 use atomic_option::AtomicOption;
-use std::time::{Duration, SystemTime};
+use std::time::{Instant, Duration, SystemTime};
 use std::thread;
 use std::sync::{
     atomic::{AtomicBool,Ordering},
@@ -53,7 +53,7 @@ impl MiningManager {
         let nproducers = ncpu;
         let noclproducers = nocl;
         let (stats_schan, stats_rchan) = mpsc::channel();
-        let (coins_schan, coins_rchan) = mpsc::sync_channel(1);
+        let (coins_schan, coins_rchan) = mpsc::sync_channel(2);
         let miners = VecDeque::new();
         let oclminers = VecDeque::new();
 
@@ -144,6 +144,7 @@ impl MiningManager {
         let start_time = SystemTime::now();
         let mut coin_check_timer = Timer::new(Duration::from_millis(self.poll_ms.into()));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
+        let mut last_new_coin_time = Instant::now();
 
         let mut coin_count : u64 = 0;
         let mut lost_coin_count : u64 = 0;
@@ -237,8 +238,10 @@ impl MiningManager {
                                 term.write_line(&format!("Failed to claim coin: {:?}", e)).unwrap();
                                 lost_coin_count += 1;
 
-                                if let Error::BadCoin(_) = e {
-                                    recent_bad_coin_count += 1;
+                                match e {
+                                    Error::BadCoin(_) => { recent_bad_coin_count += 1; }
+                                    Error::AllRequestsFailed(_) => { recent_bad_coin_count += 1; }
+                                    _ => {},
                                 }
                             }
                         }
@@ -256,7 +259,12 @@ impl MiningManager {
                             term.write_line(&format!("\nCoin has changed to: {}", last_coin)).unwrap();
                             recent_bad_coin_count = 0;
 
+                            last_new_coin_time = Instant::now();
+
                             self.update_miners(&last_coin);
+                        } else if last_new_coin_time.elapsed().as_secs() > 30 {
+                            term.write_line("\nSleeping main thread due to no coin updates").unwrap();
+                            thread::sleep(Duration::from_secs(10));
                         }
                     },
                     Err(e) => {
