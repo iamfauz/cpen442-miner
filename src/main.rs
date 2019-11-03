@@ -24,18 +24,14 @@ struct MinerOclOpts {
     #[structopt(long = "list-cl-devices")]
     cl_devices : bool,
 
-    /// Number of threads to feed OpenCL
-    #[structopt(long = "cl-threads")]
-    cl_threads : Option<usize>,
-
     /// The index of the device to use.
     /// --list-cl-devices to list the devices
     #[structopt(long = "cl-device")]
     cl_device_idx : Option<usize>,
 
-    /// Factor for multiplying the Workgroup Size
+    /// OpenCL Workgroup Size Multiplier
     /// Larger is better but with diminishing returns
-    #[structopt(long = "cl-workgroup-factor", default_value = "4")]
+    #[structopt(long = "cl-workgroup-factor", default_value = "8")]
     cl_workgroup_factor : u32,
 
     /// Attempt to throttle OpenCL GPU usage to this ratio [0 to 1]
@@ -129,7 +125,6 @@ fn main() -> Result<(), Error> {
     }
 
     let mut oclf = None;
-    let clthreads = opt.ocl.cl_threads.unwrap_or(1);
     if let Some(idx) = opt.ocl.cl_device_idx {
         let devices = ocldevice::get_cl_devices()?;
 
@@ -142,8 +137,6 @@ fn main() -> Result<(), Error> {
             return Err(Error::Msg(format!("Bad OpenCL device Index: {}", idx)));
         }
 
-        println!("Using {} threads for OpenCL", clthreads);
-
         if let Some(th) = opt.ocl.cl_utilization {
             oclf.as_mut().unwrap().throttle(th)?;
         }
@@ -151,7 +144,7 @@ fn main() -> Result<(), Error> {
         oclf.as_mut().unwrap().workgroup_factor(opt.ocl.cl_workgroup_factor);
     }
 
-    let mut mm = miner::MiningManager::new(tracker, ncpu, clthreads, oclf, opt.poll_ms);
+    let mut mm = miner::MiningManager::new(tracker, ncpu, oclf, opt.poll_ms);
 
     mm.run(&mut wallet)?;
 

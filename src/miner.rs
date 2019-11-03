@@ -38,7 +38,6 @@ pub struct MiningManager {
     coins_rchan : mpsc::Receiver<Coin>,
     coins_schan : mpsc::SyncSender<Coin>,
     nproducers : usize,
-    noclproducers : usize,
     poll_ms : u32,
     miners : VecDeque<CpuMiner>,
     oclminers : VecDeque<OclMiner>,
@@ -47,12 +46,11 @@ pub struct MiningManager {
 
 impl MiningManager {
     pub fn new(tracker : cpen442coin::Tracker,
-        ncpu : usize, nocl : usize,
+        ncpu : usize,
         oclf : Option<OclMinerFunction>,
         poll_ms : u32) -> Self {
         let nproducers = ncpu;
-        let noclproducers = nocl;
-        let (stats_schan, stats_rchan) = mpsc::sync_channel(16 * ncpu + 16 * nocl);
+        let (stats_schan, stats_rchan) = mpsc::sync_channel(16 * ncpu + 16);
         let (coins_schan, coins_rchan) = mpsc::sync_channel(2);
         let miners = VecDeque::new();
         let oclminers = VecDeque::new();
@@ -64,7 +62,6 @@ impl MiningManager {
             coins_rchan,
             coins_schan,
             nproducers,
-            noclproducers,
             poll_ms,
             miners,
             oclminerf: oclf,
@@ -159,7 +156,7 @@ impl MiningManager {
                 self.start_new_miner(&last_coin);
             }
 
-            if self.oclminers.len() < self.noclproducers {
+            if self.oclminers.len() == 0 {
                 self.start_ocl_miner(&last_coin);
             }
 
@@ -187,7 +184,11 @@ impl MiningManager {
                             }
                         }
 
-                        term.clear_line().unwrap();
+                        if term.is_term() {
+                            term.clear_line().unwrap();
+                        } else {
+                            term.write_line("").unwrap();
+                        }
                         term.write_str(&format!("Elapsed Time: {}s, Rate: {:.2} {}Hash/s, Predicted Coin Rate: {} Coins/Hour, OpenCL Loop Time: {} ms",
                                 elapsed, rate, prefix, expected_coin_rate, loop_time)).unwrap();
                     }
