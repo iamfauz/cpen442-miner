@@ -34,7 +34,7 @@ pub struct Coin {
 pub struct MiningManager {
     tracker : cpen442coin::Tracker,
     stats_rchan : mpsc::Receiver<Stats>,
-    stats_schan : mpsc::Sender<Stats>,
+    stats_schan : mpsc::SyncSender<Stats>,
     coins_rchan : mpsc::Receiver<Coin>,
     coins_schan : mpsc::SyncSender<Coin>,
     nproducers : usize,
@@ -52,7 +52,7 @@ impl MiningManager {
         poll_ms : u32) -> Self {
         let nproducers = ncpu;
         let noclproducers = nocl;
-        let (stats_schan, stats_rchan) = mpsc::channel();
+        let (stats_schan, stats_rchan) = mpsc::sync_channel(16 * ncpu + 16 * nocl);
         let (coins_schan, coins_rchan) = mpsc::sync_channel(2);
         let miners = VecDeque::new();
         let oclminers = VecDeque::new();
@@ -232,6 +232,7 @@ impl MiningManager {
                                 term.write_line(&format!("Coins Mined: {}, Coins Lost: {}, Rate: {:.2} Coins/Hour",
                                         coin_count, lost_coin_count, rate)).unwrap();
                                 last_coin = coinhash;
+                                last_new_coin_time = Instant::now();
                                 self.update_miners(&last_coin);
                             },
                             Err(e) => {
@@ -281,7 +282,7 @@ impl MiningManager {
 }
 
 struct MinerParams {
-    pub stats_schan : mpsc::Sender<Stats>,
+    pub stats_schan : mpsc::SyncSender<Stats>,
     pub coin_schan : mpsc::SyncSender<Coin>,
     pub previous_coin : String,
     pub miner_id : String,
@@ -289,7 +290,7 @@ struct MinerParams {
 
 /// Data taken into the thread
 pub struct MinerThreadData {
-    pub stats_schan : mpsc::Sender<Stats>,
+    pub stats_schan : mpsc::SyncSender<Stats>,
     pub coin_schan : mpsc::SyncSender<Coin>,
     pub miner_id : String,
 }
