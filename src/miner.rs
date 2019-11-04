@@ -13,7 +13,7 @@ use crate::{
 use openssl::hash::{Hasher, MessageDigest};
 use console::Term;
 use atomic_option::AtomicOption;
-use std::time::{Instant, Duration, SystemTime};
+use std::time::{Instant, Duration};
 use std::thread;
 use std::sync::{
     atomic::{AtomicBool,Ordering},
@@ -138,14 +138,16 @@ impl MiningManager {
         self.tracker.start_last_coin_thread(self.poll_ms);
         let mut last_coin = self.tracker.get_last_coin()?;
 
-        let start_time = SystemTime::now();
+        let start_time = Instant::now();
+        let mut stat_start_time = Instant::now();
         let mut coin_check_timer = Timer::new(Duration::from_millis(self.poll_ms.into()));
         let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
+        let mut bad_coin_print_timer = Timer::new(Duration::from_millis(4000));
         let mut last_new_coin_time = Instant::now();
 
         let mut coin_count : u64 = 0;
         let mut lost_coin_count : u64 = 0;
-        let mut mine_count : u64 = 0;
+        let mut hash_count : u64 = 0;
         let mut loop_time : u64 = 0;
         let mut recent_bad_coin_count = 0;
 
@@ -162,15 +164,14 @@ impl MiningManager {
 
             // Print the stats periodically
             if let Ok(stat) = self.stats_rchan.try_recv() {
-                mine_count += stat.nhash;
+                hash_count += stat.nhash;
                 loop_time = (loop_time + stat.loopms.unwrap_or(loop_time)) / 2;
 
                 if stats_print_timer.check_and_reset() {
-                    let elapsed = SystemTime::now().duration_since(start_time)
-                        .unwrap().as_secs();
+                    let elapsed = stat_start_time.elapsed().as_secs();
 
                     if elapsed > 0 {
-                        let rate = mine_count / elapsed;
+                        let rate = hash_count / elapsed;
                         let expected_coin_rate =  3600 * rate / std::u32::MAX as u64;
                         let mut rate = rate as f64;
                         let mut prefix = "";
@@ -189,20 +190,31 @@ impl MiningManager {
                         } else {
                             term.write_line("").unwrap();
                         }
-                        term.write_str(&format!("Elapsed Time: {}s, Rate: {:.2} {}Hash/s, Predicted Coin Rate: {} Coins/Hour, OpenCL Loop Time: {} ms",
-                                elapsed, rate, prefix, expected_coin_rate, loop_time)).unwrap();
+                        term.write_str(&format!("Rate: {:.2} {}Hash/s, Predicted Coin Rate: {} Coins/Hour, OpenCL Run Time: {} ms",
+                                rate, prefix, expected_coin_rate, loop_time)).unwrap();
                     }
+
+                    if elapsed > 600 {
+                        stat_start_time = Instant::now();
+                        hash_count = 0;
+                        loop_time = 0;
+                    }
+
+                    stats_print_timer.reset();
                 }
             }
 
-            if let Ok(coin) = self.coins_rchan.try_recv() {
+            if recent_bad_coin_count >= 3 {
+                if bad_coin_print_timer.check_and_reset() {
+                    term.write_line("\nWaiting on new coin due to too many bad requests...").unwrap();
+                    bad_coin_print_timer.reset();
+                }
+            } else if let Ok(coin) = self.coins_rchan.try_recv() {
                 let blob = base64::encode(&coin.blob);
 
                 term.write_line(&format!("\nFound Coin With Blob: {}", blob)).unwrap();
 
-                if recent_bad_coin_count >= 2 {
-                    term.write_line("\nWaiting on new coin due to too many bad requests...").unwrap();
-                } else if last_coin == coin.previous_coin {
+                if last_coin == coin.previous_coin {
                     let mut hasher = Hasher::new(MessageDigest::md5()).unwrap();
                     hasher.update(cpen442coin::COIN_PREFIX_STR.as_bytes()).unwrap();
                     hasher.update(coin.previous_coin.as_bytes()).unwrap();
@@ -227,8 +239,7 @@ impl MiningManager {
                                 // all older coins are guarenteed to be invalid
                                 coin_count += 1;
                                 recent_bad_coin_count = 0;
-                                let elapsed = SystemTime::now().duration_since(start_time)
-                                    .unwrap().as_secs();
+                                let elapsed = start_time.elapsed().as_secs();
                                 let rate = 3600.0 * coin_count as f32 / elapsed as f32;
                                 term.write_line(&format!("Coins Mined: {}, Coins Lost: {}, Rate: {:.2} Coins/Hour",
                                         coin_count, lost_coin_count, rate)).unwrap();
@@ -267,6 +278,7 @@ impl MiningManager {
                         } else if last_new_coin_time.elapsed().as_secs() > 30 {
                             term.write_line("\nSleeping main thread due to no coin updates").unwrap();
                             thread::sleep(Duration::from_secs(10));
+                            coin_check_timer.reset();
                         }
                     },
                     Err(e) => {

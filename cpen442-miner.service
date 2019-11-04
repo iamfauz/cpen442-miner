@@ -1,0 +1,15 @@
+[Unit]
+Description=CPEN 442 Miner
+Documentation=man:boinc(1)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /home/guoj/Documents/Year-4/CPEN-442/assignment4/miner/runminer.sh
+ExecStop=killall cpen442-miner
+WorkingDirectory=/home/guoj/Documents/Year-4/CPEN-442/assignment4/miner
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+# vim: ft=systemd

@@ -257,6 +257,8 @@ impl MinerFunction for OclMinerFunction {
 
             queue.finish()?;
 
+            total_ms += loop_start.elapsed().as_millis() as u64;
+
             if params_out[0] != 0xFFFFFFFF {
                 if DEBUG_ENABLE > 0 {
                     let mut hash = Vec::new();
@@ -291,7 +293,6 @@ impl MinerFunction for OclMinerFunction {
                 };
             }
 
-            total_ms += loop_start.elapsed().as_millis() as u64;
             loop_iterations += 1;
             counter += (OCL_N_LOOPS as u64) * (OCL_N_LOOPS_2 as u64) * parallel as u64;
 
