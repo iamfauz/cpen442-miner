@@ -171,9 +171,8 @@ impl MiningManager {
                     let elapsed = stat_start_time.elapsed().as_secs();
 
                     if elapsed > 0 {
-                        let rate = hash_count / elapsed;
-                        let expected_coin_rate =  3600 * rate / std::u32::MAX as u64;
-                        let mut rate = rate as f64;
+                        let mut rate = hash_count as f64 / elapsed as f64;
+                        let expected_coin_rate =  3600.0 * rate / std::u32::MAX as f64;
                         let mut prefix = "";
 
                         for p in &["K", "M", "G"] {
@@ -190,7 +189,7 @@ impl MiningManager {
                         } else {
                             term.write_line("").unwrap();
                         }
-                        term.write_str(&format!("Rate: {:.2} {}Hash/s, Predicted Coin Rate: {} Coins/Hour, OpenCL Run Time: {} ms",
+                        term.write_str(&format!("Rate: {:.2} {}Hash/s, Predicted Coin Rate: {:.2} Coins/Hour, OpenCL Run Time: {} ms",
                                 rate, prefix, expected_coin_rate, loop_time)).unwrap();
                     }
 
@@ -283,6 +282,12 @@ impl MiningManager {
                     },
                     Err(e) => {
                         term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
+
+                        if last_new_coin_time.elapsed().as_secs() > 30 {
+                            term.write_line("\nSleeping main thread due to no coin updates").unwrap();
+                            thread::sleep(Duration::from_secs(10));
+                            coin_check_timer.reset();
+                        }
                     }
                 };
             }

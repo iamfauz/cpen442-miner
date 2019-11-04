@@ -182,11 +182,6 @@ impl MinerFunction for OclMinerFunction {
         while ! tsdata.should_stop.load(Ordering::Relaxed) {
             let loop_start = Instant::now();
 
-            if let Some(new_coin) = tsdata.previous_coin.take(Ordering::Relaxed) {
-                previous_coin = new_coin;
-                message[COIN_PREFIX_STR.len()..modifiable_start].copy_from_slice(previous_coin.as_bytes());
-            }
-
             // Generate a random base message
             {
                 let mut i = modifiable_start;
@@ -259,7 +254,11 @@ impl MinerFunction for OclMinerFunction {
 
             total_ms += loop_start.elapsed().as_millis() as u64;
 
-            if params_out[0] != 0xFFFFFFFF {
+            // Check if the coin was updated, if so then our result was invalidated
+            if let Some(new_coin) = tsdata.previous_coin.take(Ordering::Relaxed) {
+                previous_coin = new_coin;
+                message[COIN_PREFIX_STR.len()..modifiable_start].copy_from_slice(previous_coin.as_bytes());
+            } else if params_out[0] != 0xFFFFFFFF {
                 if DEBUG_ENABLE > 0 {
                     let mut hash = Vec::new();
 

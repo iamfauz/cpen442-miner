@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::util::Timer;
 use std::cmp::Ordering;
 use std::path::PathBuf;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ pub struct ProxyManager {
     proxies : Mutex<BinaryHeap<ProxyClient>>,
     proxy_urls : Mutex<HashSet<String>>,
     stat_timer : Mutex<Timer>,
+    last_success : Mutex<Instant>,
 }
 
 impl ProxyManager {
@@ -24,6 +25,7 @@ impl ProxyManager {
             proxies : Mutex::new(BinaryHeap::new()),
             proxy_urls : Mutex::new(HashSet::new()),
             stat_timer : Mutex::new(Timer::new(Duration::from_secs(15))),
+            last_success : Mutex::new(Instant::now()),
         };
 
         pm.read_new_proxies()?;
@@ -73,10 +75,20 @@ impl ProxyManager {
     }
 
     fn return_client(&self, client: ProxyClient) {
+        let mut global_last = self.last_success.lock().unwrap();
+        let client_last = client.last_success;
+
+        if client_last > *global_last {
+            *global_last = client_last;
+        }
+
         if ! client.bad() {
+            self.proxies.lock().unwrap().push(client);
+        } else if global_last.elapsed().as_secs() > 60 {
             self.proxies.lock().unwrap().push(client);
         } else {
             println!("\nDropping Proxy {}\n", client.url);
+            self.proxy_urls.lock().unwrap().remove(&client.url);
         }
     }
 
@@ -104,7 +116,7 @@ impl ProxyManager {
             match Proxy::http(&line) {
                 Ok(proxy) =>  {
                     match Client::builder()
-                        .timeout(Duration::from_secs(8))
+                        .timeout(Duration::from_secs(4))
                         .gzip(false) 
                         .proxy(proxy)
                         .build() {
@@ -124,6 +136,13 @@ impl ProxyManager {
                 }
             }
         }
+
+        // Truncate the file
+        OpenOptions::new()
+            .read(false)
+            .write(true)
+            .truncate(true)
+            .open(&self.proxy_filename)?;
 
         Ok(())
     }
