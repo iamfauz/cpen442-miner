@@ -2,7 +2,7 @@ use crate::{
     error::Error,
     cpen442coin::{COIN_PREFIX_STR, MD5_BLOCK_LEN},
     miner::{Coin, Stats, MinerFunction, Miner, MinerThreadData, MinerSharedData},
-    util::Timer
+    util::*
 };
 use rand::{Rng, RngCore};
 use arrayvec::ArrayVec;
@@ -29,6 +29,7 @@ impl MinerFunction for CpuMinerFunction {
         let mut hasher = Hasher::new(MessageDigest::md5())?;
 
         let mut previous_coin = tsdata.previous_coin.take(Ordering::Relaxed).unwrap();
+        let mut num_zeros = *tsdata.difficulty.take(Ordering::Relaxed).unwrap();
 
         let mut suffix_bytes : ArrayVec<[u8; MD5_BLOCK_LEN]> = ArrayVec::new();
         suffix_bytes.try_extend_from_slice(tdata.miner_id.as_bytes()).unwrap();
@@ -48,6 +49,10 @@ impl MinerFunction for CpuMinerFunction {
                 previous_coin = new_coin;
                 unsafe { prefix_bytes.set_len(COIN_PREFIX_STR.len()); }
                 prefix_bytes.try_extend_from_slice(previous_coin.as_bytes()).unwrap();
+            }
+
+            if let Some(new_num_zeros) = tsdata.difficulty.take(Ordering::Relaxed) {
+                num_zeros = *new_num_zeros;
             }
 
             coin_block.clear();
@@ -74,9 +79,10 @@ impl MinerFunction for CpuMinerFunction {
                     hasher.update(&suffix_bytes).unwrap();
                     let h = hasher.finish()?;
 
-                    if h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 0 {
+                    if hash_starts_n_zeroes(&h[..], num_zeros) {
                         let coin = Coin {
                             previous_coin : *previous_coin,
+                            num_zeros,
                             blob : Vec::from(&coin_block[..])
                         };
 
@@ -98,7 +104,6 @@ impl MinerFunction for CpuMinerFunction {
             if last_report_timer.check_and_reset() {
                 tdata.stats_schan.send(Stats{
                     nhash: counter,
-                    loopms : None,
                 }).unwrap();
                 counter = 0;
             }
@@ -106,7 +111,6 @@ impl MinerFunction for CpuMinerFunction {
 
         tdata.stats_schan.send(Stats{
             nhash: counter,
-            loopms : None,
         }).unwrap();
 
         Ok(())

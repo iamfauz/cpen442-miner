@@ -10,11 +10,10 @@ use crate::error::Error;
 use crate::proxy::ProxyManager;
 use openssl::hash;
 use rand::{RngCore, rngs::OsRng};
-use crate::util::Timer;
+use crate::util::*;
 use std::thread;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
-use atomic_option::AtomicOption;
 
 pub const COIN_PREFIX_STR : &str = "CPEN 442 Coin2019";
 
@@ -22,16 +21,15 @@ pub const MD5_BLOCK_LEN : usize = 512 / 8;
 pub const MD5_HASH_LEN : usize = 128 / 8;
 pub const MD5_HASH_HEX_LEN : usize = MD5_HASH_LEN * 2;
 
-pub type CoinHash = String;
-
 pub struct Tracker {
     miner_id : String,
     last_coin_thread : Option<thread::JoinHandle<()>>,
     proxy_manager : Arc<ProxyManager>,
-    last_coin : Arc<AtomicOption<String>>,
-    last_coin_loc : Option<String>,
+    last_coin : Arc<Mutex<String>>,
+    difficulty : Arc<Mutex<u64>>,
     last_coin_url : &'static str,
     claim_coin_url : &'static str,
+    difficulty_url : &'static str,
     fake_last_coin : Option<String>,
     client : Client,
     client_reqs : VecDeque<Instant>,
@@ -39,7 +37,11 @@ pub struct Tracker {
 
 #[derive(Deserialize)]
 struct LastCoinResp {
-    coin_id : String
+    coin_id : String,
+    #[allow(dead_code)]
+    id_of_miner : String,
+    #[allow(dead_code)]
+    time_stamp : u64,
 }
 
 #[derive(Serialize)]
@@ -58,10 +60,17 @@ enum ClaimCoinResp {
     Success { success: String },
 }
 
+#[derive(Deserialize)]
+struct DifficultyResp {
+    number_of_leading_zeros : u64,
+    #[allow(dead_code)]
+    time_stamp: u64,
+}
+
 
 const LAST_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/last_coin";
+const DIFFICULTY_URL : &str = "http://cpen442coin.ece.ubc.ca/difficulty";
 const CLAIM_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/claim_coin";
-const VERIFY_EXAMPLE_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/verify_example_coin";
 
 impl Tracker {
     pub fn new(miner_id: String, proxy_file : PathBuf) -> Result<Tracker, Error> {
@@ -74,9 +83,10 @@ impl Tracker {
             miner_id,
             proxy_manager : Arc::new(ProxyManager::new(proxy_file)?),
             last_coin_thread : None,
-            last_coin : Arc::from(AtomicOption::empty()),
-            last_coin_loc : None,
+            last_coin : Arc::from(Mutex::new("00000000008c70b237c12e2c25d278cc".into())), // Start with a random coin
+            difficulty : Arc::from(Mutex::new(8)),
             last_coin_url : LAST_COIN_URL,
+            difficulty_url : DIFFICULTY_URL,
             claim_coin_url : CLAIM_COIN_URL,
             fake_last_coin : None,
             client,
@@ -100,28 +110,23 @@ impl Tracker {
         let mut t = Self::new(miner_id, PathBuf::new())?;
         t.last_coin_url = "FAKE";
         t.claim_coin_url = "FAKE";
+        t.difficulty_url = "FAKE";
         t.fake_last_coin = Some(fake_last_coin);
-
-        Ok(t)
-    }
-
-    #[allow(dead_code)]
-    pub fn new_verify(miner_id: String) -> Result<Tracker, Error> {
-        let mut t = Self::new(miner_id, PathBuf::new())?;
-
-        t.claim_coin_url = VERIFY_EXAMPLE_COIN_URL;
 
         Ok(t)
     }
 
     pub fn start_last_coin_thread(&mut self, poll_ms: u32) {
         if let None = &self.fake_last_coin {
-            let url = String::from(self.last_coin_url);
+            let last_coin_url = String::from(self.last_coin_url);
+            let difficulty_url = String::from(self.difficulty_url);
             let proxy_manager = self.proxy_manager.clone();
             let coin = self.last_coin.clone();
+            let difficulty = self.difficulty.clone();
 
             self.last_coin_thread = Some(thread::spawn(move || {
-                Self::get_last_coin_thread(url, proxy_manager, coin, poll_ms);
+                Self::get_thread(last_coin_url, difficulty_url,
+                    proxy_manager, coin, difficulty, poll_ms);
             }));
         }
     }
@@ -143,68 +148,61 @@ impl Tracker {
         }
     }
 
-    pub fn get_last_coin(&mut self) -> Result<CoinHash, Error> {
+    pub fn get_last_coin(&mut self) -> Result<String, Error> {
         if let Some(fake_coin) = &self.fake_last_coin {
             Ok(fake_coin.clone())
         } else {
             assert!(self.last_coin_thread.is_some());
-            loop {
-                if let Some(v) = self.last_coin.take(Ordering::Relaxed) {
-                    self.last_coin_loc = Some((*v).clone());
-                    return Ok(*v);
-                }
 
-                Self::client_check_reqs(&mut self.client_reqs);
-                if self.client_reqs.len() < 5 {
-                    self.client_reqs.push_front(Instant::now());
-                    match Self::get_last_coin_c(self.claim_coin_url, &self.client) {
-                        Ok(coin) => {
-                            if coin.len() == MD5_HASH_HEX_LEN {
-                                if let Ok(_) = hex::decode(&coin) {
-                                    self.last_coin_loc = Some(coin.clone());
+            Self::client_check_reqs(&mut self.client_reqs);
+            if self.client_reqs.len() < 5 {
+                self.client_reqs.push_front(Instant::now());
+                match Self::get_last_coin_c(self.claim_coin_url, &self.client) {
+                    Ok(coin) => {
+                        if coin.len() == MD5_HASH_HEX_LEN {
+                            if let Ok(_) = hex::decode(&coin) {
+                                *self.last_coin.lock().unwrap() = coin.clone();
 
-                                    return Ok(coin);
-                                }
+                                return Ok(coin);
                             }
-                        },
-                        Err(_) => {},
-                    }
+                        }
+                    },
+                    Err(_) => {},
                 }
-
-                if let Some(v) = &self.last_coin_loc {
-                    return Ok(v.clone());
-                }
-
-                thread::sleep(Duration::from_millis(25));
             }
+
+            Ok(self.last_coin.lock().unwrap().clone())
         }
     }
 
-    fn get_last_coin_thread(url : String,
+    fn get_thread(last_coin_url : String,
+        difficulty_url : String,
         proxy_manager: Arc<ProxyManager>,
-        coin_ptr: Arc<AtomicOption<String>>,
+        coin_ptr: Arc<Mutex<String>>,
+        difficulty_ptr: Arc<Mutex<u64>>,
         poll_ms: u32) {
 
-        let mut coin_changed_timer = Timer::new(Duration::from_secs(30));
-        let mut poll_timer = Timer::new(Duration::from_millis(poll_ms.into()));
+        let poll_ms = poll_ms as u64;
+        let mut poll_timer = Timer::new(Duration::from_millis(poll_ms));
+        let mut diff_poll_timer = Timer::new(Duration::from_millis(poll_ms * 2));
         let mut proxy_refresh_timer = Timer::new(Duration::from_secs(60));
         let mut print_error_timer = Timer::new(Duration::from_secs(30));
 
         let mut fail_count = 0;
 
         loop {
-            if poll_timer.check_and_reset() {
-                let mut last_e = None;
+            let mut last_e = None;
+
+            if poll_timer.check_and_reset_rt() {
                 for mut proxyc in proxy_manager.get_clients(8) {
                     let proxyc = proxyc.proxy_client().access();
-                    match Self::get_last_coin_c(&url, proxyc.client()) {
+                    match Self::get_last_coin_c(&last_coin_url, proxyc.client()) {
                         Ok(coin) => {
                             proxyc.success();
                             if coin.len() == MD5_HASH_HEX_LEN {
                                 if let Ok(_) = hex::decode(&coin) {
-                                    coin_ptr.replace(Some(Box::new(coin)), Ordering::Relaxed);
+                                    *coin_ptr.lock().unwrap() = coin;
 
-                                    coin_changed_timer.reset();
                                     last_e = None;
                                     fail_count = 0;
                                     break;
@@ -215,47 +213,62 @@ impl Tracker {
                             if ! Self::err_is_fatal(&e) {
                                 proxyc.success();
                             }
-                            
+
                             last_e = Some(e);
                         },
                     }
                 }
+            }
 
-                if let Some(e) = last_e {
-                    fail_count += 1;
+            if diff_poll_timer.check_and_reset_rt() {
+                for mut proxyc in proxy_manager.get_clients(8) {
+                    let proxyc = proxyc.proxy_client().access();
 
-                    if print_error_timer.check_and_reset() {
-                        println!("Get Last Coin Thread Error: {:?}", e);
+                    match Self::get_difficulty_c(&difficulty_url, proxyc.client()) {
+                        Ok(num_zeros) => {
+                            proxyc.success();
+                            *difficulty_ptr.lock().unwrap() = num_zeros;
 
-                        print_error_timer.reset();
+                            last_e = None;
+                            fail_count = 0;
+                            break;
+                        },
+                        Err(e) => {
+                            if ! Self::err_is_fatal(&e) {
+                                proxyc.success();
+                            }
+
+                            last_e = Some(e);
+                        }
                     }
+                }
+            }
 
-                    if fail_count > 5 {
-                        println!("Throttling last coin thread due to too many errors: {:?}", e);
-                        thread::sleep(Duration::from_secs(10));
-                        fail_count = 0;
-                    }
+            if let Some(e) = last_e {
+                fail_count += 1;
 
-                    // Limit the retry rate
-                    poll_timer.reset();
+                if print_error_timer.check_and_reset() {
+                    println!("\nGet Last Thread Error: {:?}", e);
                 }
 
-                if proxy_refresh_timer.check_and_reset() {
-                    proxy_manager.read_new_proxies().unwrap_or_else(|e| {
-                        println!("Failed to read new proxies: {:?}", e);
-                    });
+                if fail_count > 5 {
+                    println!("\nThrottling last thread due to too many errors: {:?}", e);
+                    thread::sleep(Duration::from_secs(10));
+                    fail_count = 0;
                 }
+            }
 
-                if coin_changed_timer.check_and_reset() {
-                    println!("\nWarning: Last coin has not changed in over 30s");
-                }
+            if proxy_refresh_timer.check_and_reset() {
+                proxy_manager.read_new_proxies().unwrap_or_else(|e| {
+                    println!("\nFailed to read new proxies: {:?}", e);
+                });
             }
 
             thread::sleep(Duration::from_millis(25));
         }
     }
 
-    fn get_last_coin_c(url : &str, client : &Client) -> Result<CoinHash, Error> {
+    fn get_last_coin_c(url : &str, client : &Client) -> Result<String, Error> {
         let mut response = client.post(url)
             .header("User-Agent", format!("CPEN442 Miner {}", OsRng.next_u64()))
             .header("X-Forwarded-For", format!("ARandomCPEN442Miner.{}.{}.x",
@@ -276,14 +289,59 @@ impl Tracker {
         }
     }
 
+    pub fn get_difficulty(&mut self) -> Result<u64, Error> {
+        if let Some(_) = &self.fake_last_coin {
+            Ok(9)
+        } else {
+            assert!(self.last_coin_thread.is_some());
+
+            Self::client_check_reqs(&mut self.client_reqs);
+            if self.client_reqs.len() < 2 {
+                self.client_reqs.push_front(Instant::now());
+                match Self::get_difficulty_c(self.difficulty_url, &self.client) {
+                    Ok(num_zeros) => {
+                        if num_zeros < 16 {
+                            *self.difficulty.lock().unwrap() = num_zeros;
+
+                            return Ok(num_zeros);
+                        } else {
+                            println!("\nReceived Difficulty is too high ({})!", num_zeros)
+                        }
+
+                    },
+                    Err(_) => {},
+                }
+            }
+
+            Ok(*self.difficulty.lock().unwrap())
+        }
+    }
+
+    fn get_difficulty_c(url : &str, client : &Client) -> Result<u64, Error> {
+        let mut response = client.post(url)
+            .header("User-Agent", format!("CPEN442 Miner {}", OsRng.next_u64()))
+            .header("X-Forwarded-For", format!("ARandomCPEN442Miner.{}.{}.x",
+                    OsRng.next_u32(), OsRng.next_u32()))
+            .send()?;
+
+        let code = response.status();
+
+        if code.is_success() {
+            let response : DifficultyResp = response.json()?;
+
+            Ok(response.number_of_leading_zeros)
+        } else if code.as_u16() == 400 || code.as_u16() == 429 || code.as_u16() == 409 {
+            Err(Error::ServerBusy)
+        } else {
+            Err(Error::new(format!("Get Difficulty Failed Http {}: {}",
+                        code.as_u16(), code.canonical_reason().unwrap_or(""))))
+        }
+    }
+
     pub fn claim_coin(&mut self,
         blob: Vec<u8>,
         previous_coin: String,
         hash: &str) -> Result<(), Error> {
-
-        if hash[0..8] != *"00000000" {
-            return Err(Error::BadCoin("Prefix is not zero".into()));
-        }
 
         if let Some(fake_coin) = &self.fake_last_coin {
             if *fake_coin != previous_coin {
@@ -297,7 +355,14 @@ impl Tracker {
             hasher.update(self.miner_id.as_bytes()).unwrap();
             let h = hasher.finish().unwrap();
             let h_hex = hex::encode(&h[..]);
-            if h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 0 {
+            if hex_starts_n_zeroes(hash, *self.difficulty.lock().unwrap()) {
+                if hash != h_hex {
+                    return Err(Error::new(
+                            format!("Calculated hash {} does not match given hash {}!",
+                                h_hex, hash)
+                    ));
+                }
+
                 self.fake_last_coin = Some(h_hex);
                 Ok(())
             } else {
@@ -322,7 +387,7 @@ impl Tracker {
                 self.client_reqs.push_front(Instant::now());
                 match Self::claim_coin_c(self.claim_coin_url, &self.client, &req) {
                     Ok(_) => {
-                        self.last_coin_loc = Some(String::from(hash));
+                        *self.last_coin.lock().unwrap() = String::from(hash);
                         return Ok(())
                     },
                     Err(e) => {
@@ -339,7 +404,7 @@ impl Tracker {
                 match Self::claim_coin_c(self.claim_coin_url, proxyc.client(), &req) {
                     Ok(_) => {
                         proxyc.success();
-                        self.last_coin_loc = Some(String::from(hash));
+                        *self.last_coin.lock().unwrap() = String::from(hash);
                         return Ok(())
                     },
                     Err(e) => {
@@ -413,51 +478,6 @@ impl Tracker {
             },
             Error::ServerBusy => false,
             _ => true
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use base64;
-
-    #[test]
-    fn test_last_coin_ok() {
-        let mut t = Tracker::new("d41f33d21c5b2c49053c2b1cc2a8cc84".into(),
-            Vec::new()).unwrap();
-
-        let coin = t.get_last_coin().unwrap();
-
-        assert_eq!(&coin[0..8], "00000000");
-
-        println!("Last Coin: {}", coin);
-    }
-
-    #[test]
-    fn test_claim_coin_ok() {
-        let mut t = Tracker::new_verify("d41f33d21c5b2c49053c2b1cc2a8cc84".into()).unwrap();
-        //t.claim_coin_url = "http://localhost:55555/verify_example_coin";
-
-        let coin = base64::decode("WICbUP4soPxDWXV92qR6dpP7Rhs=").unwrap();
-
-        t.claim_coin(coin).unwrap();
-    }
-
-    #[test]
-    fn test_claim_coin_fail() {
-        let mut t = Tracker::new_verify("d41f33d21c5b2c49052b1cc2a8cc84".into()).unwrap();
-        //t.claim_coin_url = "http://localhost:55555/verify_coin";
-
-        let coin = base64::decode("WICbUP4soPxDWXV92qR6dpP7Rhs=").unwrap();
-
-        let e = t.claim_coin(coin).unwrap_err();
-
-        if let Error::Msg(msg) = e {
-            println!("Message = {}", msg);
-            //assert!(msg.contains("unable to verify coin"));
-        } else {
-            panic!("Bad Error: {:?}", e);
         }
     }
 }

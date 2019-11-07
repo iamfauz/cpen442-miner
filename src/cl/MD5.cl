@@ -182,10 +182,10 @@ __kernel void md5(
   const uint id = get_global_id(0);
   uint message[MESSAGE_LEN];
   uint zero_pad[16];
-  uint r0 = params_in[0];
-  uint r1 = params_in[1];
-  uint r2 = params_in[2];
-  uint r3 = params_in[3];
+  uint word2_mask = params_in[0];
+  uint r0 = params_in[1];
+  uint r1 = params_in[2];
+  uint r2 = params_in[3];
 
   // Set most significant bit of first pad byte
   zero_pad[0] = 0x80;
@@ -243,8 +243,11 @@ __kernel void md5(
       // Note skip the padding algorithm since the
       // message is already a multiple of the block size
 
-      // Output our prefix
-      if (md5_state_2[0] == 0 && params_out[0] == 0xFFFFFFFF) {
+      // Check if the prefix is okay
+      if (md5_state_2[0] == 0 && ((md5_state_2[1] & word2_mask) == 0)
+          // Check that another core hasn't already set the output
+          // Note that this is isn't guarenteed to prevent clobbering
+          && params_out[0] == 0xFFFFFFFF) {
         params_out[0] = id;
         params_out[1] = i;
         params_out[2] = j;

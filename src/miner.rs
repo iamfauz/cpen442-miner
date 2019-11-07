@@ -6,7 +6,7 @@ use crate::{
     error::Error,
     cpen442coin,
     cryptowallet::Wallet,
-    util::Timer,
+    util::*,
     cpuminer::{CpuMiner, CpuMinerFunction},
     oclminer::{OclMiner, OclMinerFunction}
 };
@@ -23,11 +23,11 @@ use std::sync::{
 
 pub struct Stats {
     pub nhash : u64,
-    pub loopms : Option<u64>,
 }
 
 pub struct Coin {
     pub previous_coin : String,
+    pub num_zeros : u64,
     pub blob : Vec<u8>
 }
 
@@ -41,19 +41,20 @@ pub struct MiningManager {
     poll_ms : u32,
     miners : VecDeque<CpuMiner>,
     oclminers : VecDeque<OclMiner>,
-    oclminerf : Option<OclMinerFunction>,
+    oclminerfuncs : VecDeque<OclMinerFunction>,
 }
 
 impl MiningManager {
     pub fn new(tracker : cpen442coin::Tracker,
         ncpu : usize,
-        oclf : Option<OclMinerFunction>,
+        oclf : Vec<OclMinerFunction>,
         poll_ms : u32) -> Self {
         let nproducers = ncpu;
         let (stats_schan, stats_rchan) = mpsc::sync_channel(16 * ncpu + 16);
         let (coins_schan, coins_rchan) = mpsc::sync_channel(2);
         let miners = VecDeque::new();
         let oclminers = VecDeque::new();
+        let oclminerfuncs = VecDeque::from(oclf);
 
         MiningManager {
             tracker,
@@ -64,54 +65,65 @@ impl MiningManager {
             nproducers,
             poll_ms,
             miners,
-            oclminerf: oclf,
+            oclminerfuncs,
             oclminers,
         }
     }
 
-    fn start_new_miner(&mut self, last_coin : &str) {
+    fn start_new_miner(&mut self, last_coin : &str, difficulty : u64) {
         let miner = Miner::new(
             CpuMinerFunction::new(),
             MinerParams {
             stats_schan : self.stats_schan.clone(),
             coin_schan : self.coins_schan.clone(),
             previous_coin : String::from(last_coin),
+            difficulty,
             miner_id : String::from(self.tracker.id())
         });
 
         self.miners.push_back(miner);
-
-        let last = self.miners.len() - 1;
-
-        self.miners[last].run();
+        self.miners.back_mut().unwrap().run();
     }
 
-    fn start_ocl_miner(&mut self, last_coin : &str) {
-        if let Some(oclminerf) = &self.oclminerf {
+    fn start_ocl_miner(&mut self, last_coin : &str, difficulty : u64) {
+        // Go through miners in round robin order to prevent
+        // multiple of the same miner running
+        if let Some(oclminerfunc) = self.oclminerfuncs.pop_front() {
             let miner = Miner::new(
-                oclminerf.clone(),
+                oclminerfunc.clone(),
                 MinerParams {
                     stats_schan : self.stats_schan.clone(),
                     coin_schan : self.coins_schan.clone(),
                     previous_coin : String::from(last_coin),
+                    difficulty,
                     miner_id : String::from(self.tracker.id())
-                });
+                }
+            );
+
+            self.oclminerfuncs.push_back(oclminerfunc);
 
             self.oclminers.push_back(miner);
-
-            let last = self.oclminers.len() - 1;
-
-            self.oclminers[last].run();
+            self.oclminers.back_mut().unwrap().run();
         }
     }
 
-    fn update_miners(&self, coin : &String) {
+    fn update_miners_coin(&self, coin : &String) {
         for miner in &self.miners {
             miner.update_prev_coin(coin.clone());
         }
 
         for miner in &self.oclminers {
             miner.update_prev_coin(coin.clone());
+        }
+    }
+
+    fn update_miners_difficulty(&self, coin : u64) {
+        for miner in &self.miners {
+            miner.update_difficulty(coin);
+        }
+
+        for miner in &self.oclminers {
+            miner.update_difficulty(coin);
         }
     }
 
@@ -137,42 +149,43 @@ impl MiningManager {
         let term = Term::stderr();
         self.tracker.start_last_coin_thread(self.poll_ms);
         let mut last_coin = self.tracker.get_last_coin()?;
+        let mut last_num_zeros = self.tracker.get_difficulty()?;
 
         let start_time = Instant::now();
         let mut stat_start_time = Instant::now();
         let mut coin_check_timer = Timer::new(Duration::from_millis(self.poll_ms.into()));
-        let mut stats_print_timer = Timer::new(Duration::from_millis(2000));
-        let mut bad_coin_print_timer = Timer::new(Duration::from_millis(4000));
-        let mut last_new_coin_time = Instant::now();
+        let mut stats_print_timer = Timer::new(Duration::from_millis(5000));
+        let mut bad_coin_start_time = Instant::now();
+        let mut bad_coin_print_timer = Timer::new(Duration::from_millis(10000));
 
         let mut coin_count : u64 = 0;
         let mut lost_coin_count : u64 = 0;
         let mut hash_count : u64 = 0;
-        let mut loop_time : u64 = 0;
         let mut recent_bad_coin_count = 0;
 
         term.write_line(&format!("Mining Coin: {}", last_coin)).unwrap();
+        term.write_line(&format!("Difficulty: {}", last_num_zeros)).unwrap();
 
         loop {
             if self.miners.len() < self.nproducers {
-                self.start_new_miner(&last_coin);
+                self.start_new_miner(&last_coin, last_num_zeros);
             }
 
-            if self.oclminers.len() == 0 {
-                self.start_ocl_miner(&last_coin);
+            if self.oclminers.len() < self.oclminerfuncs.len() {
+                self.start_ocl_miner(&last_coin, last_num_zeros);
             }
 
             // Print the stats periodically
             if let Ok(stat) = self.stats_rchan.try_recv() {
                 hash_count += stat.nhash;
-                loop_time = (loop_time + stat.loopms.unwrap_or(loop_time)) / 2;
 
                 if stats_print_timer.check_and_reset() {
                     let elapsed = stat_start_time.elapsed().as_secs();
 
                     if elapsed > 0 {
                         let mut rate = hash_count as f64 / elapsed as f64;
-                        let expected_coin_rate =  3600.0 * rate / std::u32::MAX as f64;
+                        let expected_coin_rate = 3600.0 * rate /
+                            (1u64 << (4 * last_num_zeros)) as f64;
                         let mut prefix = "";
 
                         for p in &["K", "M", "G"] {
@@ -189,31 +202,31 @@ impl MiningManager {
                         } else {
                             term.write_line("").unwrap();
                         }
-                        term.write_str(&format!("Rate: {:.2} {}Hash/s, Predicted Coin Rate: {:.2} Coins/Hour, OpenCL Run Time: {} ms",
-                                rate, prefix, expected_coin_rate, loop_time)).unwrap();
+                        term.write_str(&format!("Difficulty: {}, Rate: {:.2} {}Hash/s, Predicted Coin Rate: {:.3} Coins/Hour",
+                                last_num_zeros, rate, prefix, expected_coin_rate)).unwrap();
                     }
 
                     if elapsed > 600 {
                         stat_start_time = Instant::now();
                         hash_count = 0;
-                        loop_time = 0;
                     }
-
-                    stats_print_timer.reset();
                 }
             }
 
-            if recent_bad_coin_count >= 3 {
+            if recent_bad_coin_count >= 5 {
                 if bad_coin_print_timer.check_and_reset() {
-                    term.write_line("\nWaiting on new coin due to too many bad requests...").unwrap();
-                    bad_coin_print_timer.reset();
+                    term.write_line("\nWaiting on coin update due to too many bad requests...").unwrap();
+                }
+
+                if bad_coin_start_time.elapsed().as_secs() >= 60 {
+                    recent_bad_coin_count = 0;
                 }
             } else if let Ok(coin) = self.coins_rchan.try_recv() {
                 let blob = base64::encode(&coin.blob);
 
                 term.write_line(&format!("\nFound Coin With Blob: {}", blob)).unwrap();
 
-                if last_coin == coin.previous_coin {
+                if last_coin == coin.previous_coin && last_num_zeros <= coin.num_zeros {
                     let mut hasher = Hasher::new(MessageDigest::md5()).unwrap();
                     hasher.update(cpen442coin::COIN_PREFIX_STR.as_bytes()).unwrap();
                     hasher.update(coin.previous_coin.as_bytes()).unwrap();
@@ -222,7 +235,7 @@ impl MiningManager {
                     let h = hasher.finish().unwrap();
                     let coinhash = hex::encode(&h[..]);
 
-                    if h[0] == 0 && h[1] == 0 && h[2] == 0 && h[3] == 0 {
+                    if hash_starts_n_zeroes(&h[..], last_num_zeros) {
                         term.write_line(&format!("\nTrying to claim coin with hash: {}", coinhash)).unwrap();
 
                         match self.tracker.claim_coin(coin.blob.clone(), coin.previous_coin.clone(), &coinhash) {
@@ -240,19 +253,24 @@ impl MiningManager {
                                 recent_bad_coin_count = 0;
                                 let elapsed = start_time.elapsed().as_secs();
                                 let rate = 3600.0 * coin_count as f32 / elapsed as f32;
-                                term.write_line(&format!("Coins Mined: {}, Coins Lost: {}, Rate: {:.2} Coins/Hour",
+                                term.write_line(&format!("Coins Mined: {}, Coins Lost: {}, Rate: {:.3} Coins/Hour",
                                         coin_count, lost_coin_count, rate)).unwrap();
                                 last_coin = coinhash;
-                                last_new_coin_time = Instant::now();
-                                self.update_miners(&last_coin);
+                                self.update_miners_coin(&last_coin);
                             },
                             Err(e) => {
                                 term.write_line(&format!("Failed to claim coin: {:?}", e)).unwrap();
                                 lost_coin_count += 1;
 
                                 match e {
-                                    Error::BadCoin(_) => { recent_bad_coin_count += 1; }
-                                    Error::AllRequestsFailed(_) => { recent_bad_coin_count += 1; }
+                                    Error::BadCoin(_) => {
+                                        recent_bad_coin_count += 1;
+                                        bad_coin_start_time = Instant::now();
+                                    }
+                                    Error::AllRequestsFailed(_) => {
+                                        recent_bad_coin_count += 1;
+                                        bad_coin_start_time = Instant::now();
+                                    }
                                     _ => {},
                                 }
                             }
@@ -271,25 +289,29 @@ impl MiningManager {
                             term.write_line(&format!("\nCoin has changed to: {}", last_coin)).unwrap();
                             recent_bad_coin_count = 0;
 
-                            last_new_coin_time = Instant::now();
-
-                            self.update_miners(&last_coin);
-                        } else if last_new_coin_time.elapsed().as_secs() > 30 {
-                            term.write_line("\nSleeping main thread due to no coin updates").unwrap();
-                            thread::sleep(Duration::from_secs(10));
-                            coin_check_timer.reset();
+                            self.update_miners_coin(&last_coin);
                         }
                     },
                     Err(e) => {
                         term.write_line(&format!("\nFailed to get last coin: {:?}", e)).unwrap();
-
-                        if last_new_coin_time.elapsed().as_secs() > 30 {
-                            term.write_line("\nSleeping main thread due to no coin updates").unwrap();
-                            thread::sleep(Duration::from_secs(10));
-                            coin_check_timer.reset();
-                        }
                     }
                 };
+
+                match self.tracker.get_difficulty() {
+                    Ok(num_zeros) => {
+                        if num_zeros != last_num_zeros {
+                            last_num_zeros = num_zeros;
+                            term.write_line(&format!("\nDifficulty has changed to: {} zeros", last_num_zeros)).unwrap();
+
+                            recent_bad_coin_count = 0;
+
+                            self.update_miners_difficulty(last_num_zeros);
+                        }
+                    },
+                    Err(e) => {
+                        term.write_line(&format!("\nFailed to get difficulty: {:?}", e)).unwrap();
+                    }
+                }
             }
 
             self.prune_stopped_miners();
@@ -303,6 +325,7 @@ struct MinerParams {
     pub stats_schan : mpsc::SyncSender<Stats>,
     pub coin_schan : mpsc::SyncSender<Coin>,
     pub previous_coin : String,
+    pub difficulty : u64,
     pub miner_id : String,
 }
 
@@ -317,6 +340,7 @@ pub struct MinerThreadData {
 /// managed by a mutex
 pub struct MinerSharedData {
     pub previous_coin : AtomicOption<String>,
+    pub difficulty : AtomicOption<u64>,
     pub should_stop : AtomicBool,
 }
 
@@ -344,6 +368,7 @@ impl<T: MinerFunction + Sized + Send + 'static> Miner<T>
             }),
             tsdata : Arc::from(MinerSharedData {
                 previous_coin : AtomicOption::from(Some(Box::from(params.previous_coin))),
+                difficulty : AtomicOption::from(Some(Box::from(params.difficulty))),
                 should_stop : AtomicBool::new(false),
             }),
             thread : None
@@ -374,6 +399,10 @@ impl<T: MinerFunction + Sized + Send + 'static> Miner<T>
 
     fn update_prev_coin(&self, coin : String) {
         self.tsdata.previous_coin.replace(Some(Box::from(coin)), Ordering::Relaxed);
+    }
+
+    fn update_difficulty(&self, difficulty : u64) {
+        self.tsdata.difficulty.replace(Some(Box::from(difficulty)), Ordering::Relaxed);
     }
 
     fn is_stopped(&self) -> bool {

@@ -24,7 +24,7 @@ impl ProxyManager {
             proxy_filename,
             proxies : Mutex::new(BinaryHeap::new()),
             proxy_urls : Mutex::new(HashSet::new()),
-            stat_timer : Mutex::new(Timer::new(Duration::from_secs(15))),
+            stat_timer : Mutex::new(Timer::new(Duration::from_secs(30))),
             last_success : Mutex::new(Instant::now()),
         };
 
@@ -43,7 +43,6 @@ impl ProxyManager {
                 proxies.len(), proxies.peek()
                 .map(|p| { p.latency.as_millis() })
                 .unwrap_or(0));
-            stat_timer.reset();
         }
 
         let n = std::cmp::min(proxies.len(), n);

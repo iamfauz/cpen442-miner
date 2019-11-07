@@ -13,12 +13,17 @@ proxies_out=$2
 
 curl_opts=(
     -X POST
-    --retry 3
+    --retry 1
     --retry-delay 1
-    --max-time 5
+    --max-time 3
 )
 
 while read proxy; do
+    if grep "$proxy" "$proxies_out"; then
+        echo "Proxy $proxy already tested"
+        continue
+    fi
+
     echo "Testing $proxy"
     if curl "${curl_opts[@]}" -x "$proxy" http://cpen442coin.ece.ubc.ca/last_coin | grep coin_id; then
         echo "$proxy is ok"

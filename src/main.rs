@@ -24,19 +24,18 @@ struct MinerOclOpts {
     #[structopt(long = "list-cl-devices")]
     cl_devices : bool,
 
-    /// The index of the device to use.
+    /// The indexes of the OpenCL devices to use.
     /// --list-cl-devices to list the devices
     #[structopt(long = "cl-device")]
-    cl_device_idx : Option<usize>,
+    cl_device_idxs : Option<Vec<usize>>,
 
-    /// OpenCL Workgroup Size Multiplier
-    /// Larger is better but with diminishing returns
-    #[structopt(long = "cl-workgroup-factor", default_value = "8")]
-    cl_workgroup_factor : u32,
-
-    /// Attempt to throttle OpenCL GPU usage to this ratio [0 to 1]
+    /// Attempt to throttle OpenCL GPUs usage to this ratio [0 to 1]
     #[structopt(long = "cl-max-utilize")]
     cl_utilization : Option<f32>,
+
+    /// Don't allow OpenCL to take longer than this number of milliseconds
+    #[structopt(long = "cl-max-ms")]
+    cl_max_ms : Option<u32>,
 }
 
 #[derive(Debug, StructOpt)]
@@ -124,27 +123,34 @@ fn main() -> Result<(), Error> {
         }
     }
 
-    let mut oclf = None;
-    if let Some(idx) = opt.ocl.cl_device_idx {
-        let devices = ocldevice::get_cl_devices()?;
+    let mut all_oclfs = Vec::new();
+    if let Some(cl_device_idxs) = opt.ocl.cl_device_idxs {
+        for idx in cl_device_idxs {
+            let devices = ocldevice::get_cl_devices()?;
 
-        if let Some(p) = devices.get(idx) {
-            println!("Using OpenCL Device:");
-            ocldevice::print_plat_dev_pair(p)?;
+            let mut oclf;
+            if let Some(p) = devices.get(idx) {
+                println!("Using OpenCL Device:");
+                ocldevice::print_plat_dev_pair(p)?;
 
-            oclf = Some(oclminer::OclMinerFunction::new(p.0, p.1)?);
-        } else {
-            return Err(Error::Msg(format!("Bad OpenCL device Index: {}", idx)));
+                oclf = oclminer::OclMinerFunction::new(p.0, p.1)?;
+            } else {
+                return Err(Error::Msg(format!("Bad OpenCL device Index: {}", idx)));
+            }
+
+            if let Some(th) = opt.ocl.cl_utilization {
+                oclf.throttle(th)?;
+            }
+
+            if let Some(ms) = opt.ocl.cl_max_ms {
+                oclf.set_max_loop_ms(ms);
+            }
+
+            all_oclfs.push(oclf);
         }
-
-        if let Some(th) = opt.ocl.cl_utilization {
-            oclf.as_mut().unwrap().throttle(th)?;
-        }
-
-        oclf.as_mut().unwrap().workgroup_factor(opt.ocl.cl_workgroup_factor);
     }
 
-    let mut mm = miner::MiningManager::new(tracker, ncpu, oclf, opt.poll_ms);
+    let mut mm = miner::MiningManager::new(tracker, ncpu, all_oclfs, opt.poll_ms);
 
     mm.run(&mut wallet)?;
 

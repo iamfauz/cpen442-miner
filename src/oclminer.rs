@@ -3,10 +3,11 @@ use openssl;
 use ocl_extras::full_device_info::FullDeviceInfo;
 use rand::{RngCore, rngs::OsRng};
 use crate::{
+    ocldevice,
     error::Error,
     cpen442coin, cpen442coin::COIN_PREFIX_STR,
     miner::{Coin, Stats, Miner, MinerFunction, MinerThreadData, MinerSharedData},
-    util::Timer
+    util::*
 };
 use std::mem::size_of;
 use std::sync::{Arc, atomic::Ordering};
@@ -20,11 +21,11 @@ pub struct OclMinerFunction {
     context : ocl::Context,
     program : ocl::Program,
     device : ocl::Device,
-    workgroup_factor : u32,
+    max_loop_ms : u32,
     throttle_of_100 : u32
 }
 
-const DEBUG_ENABLE : usize = 0; // 0 or 1
+const DEBUG_ENABLE : usize = 1; // 0 or 1
 
 const OCL_WORD_LEN : usize = size_of::<u32>();
 const OCL_MESSAGE_LEN : usize = cpen442coin::MD5_BLOCK_LEN * 4;
@@ -39,7 +40,8 @@ const MD5PROGRAM : &str = include_str!("cl/MD5.cl");
 
 // Same transformation as happens on the GPU
 fn message_for_id(message_base: &[u8], mod_start: usize, mod_end: usize,
-    id: u32, idx : u32, idx2 : u32, r : &[u32; 4]) -> Vec<u8> {
+    id: u32, idx : u32, idx2 : u32, r : &[u32]) -> Vec<u8> {
+    assert_eq!(r.len(), 3);
     use slice_of_array::SliceArrayExt;
     const BLOB_INDEX : usize = OCL_BLOB_INDEX / OCL_WORD_LEN;
     const BLOB_LEN_FAST : usize = OCL_BLOB_LEN_FAST / OCL_WORD_LEN;
@@ -118,13 +120,13 @@ impl OclMinerFunction {
             context,
             program,
             device,
-            workgroup_factor: 4,
+            max_loop_ms: 500,
             throttle_of_100: 0,
         })
     }
 
-    pub fn workgroup_factor(&mut self, workgroup_factor: u32) {
-        self.workgroup_factor = workgroup_factor;
+    pub fn set_max_loop_ms(&mut self, loop_ms : u32) {
+        self.max_loop_ms = loop_ms;
     }
 
     pub fn throttle(&mut self, utilization : f32) -> Result<(), Error> {
@@ -145,11 +147,28 @@ impl MinerFunction for OclMinerFunction {
         let mut rng = rand::thread_rng();
 
         let start = Instant::now();
-        let mut counter = 0;
-        let mut total_ms = 0;
+        let device_descriptor = ocldevice::get_device_descriptor(&self.device);
+        let mut stat_hash_counter = 0;
+        let mut loop_ms = 0;
         let mut loop_iterations = 0;
         let mut last_report_timer = Timer::new(Duration::from_millis(2000));
+        let mut print_ocl_info_timer = Timer::new(Duration::from_secs(30));
         let mut previous_coin = tsdata.previous_coin.take(Ordering::Relaxed).unwrap();
+        let mut num_zeros = *tsdata.difficulty.take(Ordering::Relaxed).unwrap();
+
+        let num_zeros_to_word2_mask = |nz : u64| -> u32 {
+            let even_nz = nz - (nz % 2);
+            let even_bits = (even_nz - 8) * 4;
+            let even_mask = (1u32 << even_bits) - 1;
+            
+            if nz % 2 == 0 {
+                even_mask
+            } else {
+                even_mask | (0xF0 << even_bits)
+            }
+        };
+
+        let mut hash_word2_mask = num_zeros_to_word2_mask(num_zeros);
 
         let mut message = [0u8; OCL_MESSAGE_LEN];
         let modifiable_start = COIN_PREFIX_STR.len() + previous_coin.len();
@@ -157,15 +176,20 @@ impl MinerFunction for OclMinerFunction {
 
         message[0..COIN_PREFIX_STR.len()].copy_from_slice(COIN_PREFIX_STR.as_bytes());
         message[COIN_PREFIX_STR.len()..modifiable_start].copy_from_slice(previous_coin.as_bytes());
-        message[modifiable_end..OCL_MESSAGE_LEN]
-            .copy_from_slice(tdata.miner_id.as_bytes());
+        message[modifiable_end..OCL_MESSAGE_LEN].copy_from_slice(tdata.miner_id.as_bytes());
 
         if ! self.device.endian_little().expect("Failed to get Endianess") {
             to_big_endian_u32(&mut message);
             panic!("Big Endian!");
         }
 
-        let parallel = self.device.max_wg_size()? * self.workgroup_factor as usize;
+        const WG_MULTIPLIER_CHANGE_ITERATIONS : u64 = 64;
+        let dev_wg_size = self.device.max_wg_size()?;
+        let mut last_wg_multiplier_hash_rate = 0;
+        let mut wg_multiplier_hash_count = 1;
+        let mut wg_multiplier_runtime_ms = 1;
+        let mut wg_multiplier = 1;
+        let mut wg_multiplier_found_peak = false;
 
         let queue = ocl::Queue::new(&self.context, self.device.clone(), None)?;
 
@@ -173,7 +197,7 @@ impl MinerFunction for OclMinerFunction {
             .program(&self.program)
             .name("md5")
             .queue(queue.clone())
-            .global_work_size(parallel)
+            .global_work_size(dev_wg_size)
             .arg_named("base_message", None::<&ocl::Buffer<u32>>)
             .arg_named("params_in", None::<&ocl::Buffer<u32>>)
             .arg_named("params_out", None::<&ocl::Buffer<u32>>)
@@ -181,6 +205,9 @@ impl MinerFunction for OclMinerFunction {
 
         while ! tsdata.should_stop.load(Ordering::Relaxed) {
             let loop_start = Instant::now();
+
+            // Current workgroup size
+            let wg_size = dev_wg_size * wg_multiplier;
 
             // Generate a random base message
             {
@@ -213,10 +240,10 @@ impl MinerFunction for OclMinerFunction {
                 .build()?;
 
             let params_in = [
+                hash_word2_mask,
                 OsRng.next_u32(),
                 rng.next_u32(),
                 OsRng.next_u32(),
-                rng.next_u32(),
             ];
 
             let params_in_buf = ocl::Buffer::<u32>::builder()
@@ -242,7 +269,11 @@ impl MinerFunction for OclMinerFunction {
             kernel.set_arg("params_in", &params_in_buf)?;
             kernel.set_arg("params_out", &params_out_buf)?;
 
-            unsafe { kernel.cmd().queue(&queue).enq()?; }
+            let cmd = kernel.cmd()
+                .queue(&queue)
+                .global_work_size(wg_size);
+
+            unsafe { cmd.enq()?; }
 
             params_out_buf.cmd()
                 .queue(&queue)
@@ -252,13 +283,24 @@ impl MinerFunction for OclMinerFunction {
 
             queue.finish()?;
 
-            total_ms += loop_start.elapsed().as_millis() as u64;
+            let loop_iteration_ms = loop_start.elapsed().as_millis() as u64;
+            loop_ms = (loop_ms + loop_iteration_ms) / 2;
+            wg_multiplier_runtime_ms += loop_iteration_ms;
 
-            // Check if the coin was updated, if so then our result was invalidated
+            // Check if the coin was updated, if so then the result is invalidated
             if let Some(new_coin) = tsdata.previous_coin.take(Ordering::Relaxed) {
                 previous_coin = new_coin;
                 message[COIN_PREFIX_STR.len()..modifiable_start].copy_from_slice(previous_coin.as_bytes());
-            } else if params_out[0] != 0xFFFFFFFF {
+                continue;
+            }
+
+            // Check if difficulty was updated, if so then the result **might** be invalidated
+            if let Some(new_num_zeros) = tsdata.difficulty.take(Ordering::Relaxed) {
+                num_zeros = *new_num_zeros;
+                hash_word2_mask = num_zeros_to_word2_mask(num_zeros);
+            }
+
+            if params_out[0] != 0xFFFFFFFF {
                 if DEBUG_ENABLE > 0 {
                     let mut hash = Vec::new();
 
@@ -266,6 +308,7 @@ impl MinerFunction for OclMinerFunction {
                         hash.extend_from_slice(&params_out[i].to_le_bytes());
                     }
 
+                    println!("\nDEBUG Word 2 Mask: {:?}\n", hash_word2_mask.to_le_bytes());
                     println!("\nDEBUG GPU Hash: {}\n", hex::encode(hash));
 
                     let mut gpu_message = Vec::new();
@@ -280,9 +323,9 @@ impl MinerFunction for OclMinerFunction {
 
                 let coin = Coin {
                     previous_coin : (*previous_coin).clone(),
-                    //blob : message_for_id(message_words, i as u32)
+                    num_zeros,
                     blob : message_for_id(&message, modifiable_start, modifiable_end,
-                        params_out[0], params_out[1], params_out[2], &params_in)
+                        params_out[0], params_out[1], params_out[2], &params_in[1..4]),
                 };
 
                 match tdata.coin_schan.send(coin) {
@@ -293,19 +336,49 @@ impl MinerFunction for OclMinerFunction {
             }
 
             loop_iterations += 1;
-            counter += (OCL_N_LOOPS as u64) * (OCL_N_LOOPS_2 as u64) * parallel as u64;
+
+            // Gather hashes for stats
+            let nhashes = (OCL_N_LOOPS as u64) * (OCL_N_LOOPS_2 as u64) * wg_size as u64;
+            stat_hash_counter += nhashes;
+            wg_multiplier_hash_count += nhashes;
 
             if last_report_timer.check_and_reset() {
-                //println!("\nLoop Time {}ms", total_ms as f64 / loop_iterations as f64);
                 tdata.stats_schan.send(Stats{
-                    nhash: counter,
-                    loopms: Some(total_ms / loop_iterations)
+                    nhash: stat_hash_counter,
                 }).unwrap();
-                counter = 0;
+                stat_hash_counter = 0;
+            }
+
+            if print_ocl_info_timer.check_and_reset() {
+                println!("\nOpenCL ({}) Workgroup Size: {}, Workgroup Multiplier: {}, Loop Time: {} ms",
+                    device_descriptor, wg_size, wg_multiplier, loop_ms);
             }
 
             if loop_iterations % 100 < self.throttle_of_100 as u64 {
-                thread::sleep(Duration::from_millis(2 * total_ms / loop_iterations));
+                thread::sleep(Duration::from_millis(2 * loop_ms));
+            }
+
+            if loop_iterations % WG_MULTIPLIER_CHANGE_ITERATIONS == 0 {
+                let hash_rate = 1000 * wg_multiplier_hash_count / wg_multiplier_runtime_ms;
+                let cur_loop_ms = wg_multiplier_runtime_ms / WG_MULTIPLIER_CHANGE_ITERATIONS;
+                if ! wg_multiplier_found_peak {
+                    // Loop is taking too long
+                    if cur_loop_ms > self.max_loop_ms as u64 {
+                        wg_multiplier /= 2;
+                        wg_multiplier_found_peak = true;
+                    } else if hash_rate < last_wg_multiplier_hash_rate {
+                        // Increased wg size decreased performance
+                        wg_multiplier /= 2;
+                        wg_multiplier_found_peak = true;
+                    } else {
+                        // Increased wg size increased performance
+                        wg_multiplier *= 2;
+                    }
+                }
+
+                last_wg_multiplier_hash_rate = hash_rate;
+                wg_multiplier_hash_count = 0;
+                wg_multiplier_runtime_ms = 0;
             }
         }
 

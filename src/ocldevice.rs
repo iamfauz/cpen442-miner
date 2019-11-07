@@ -15,6 +15,10 @@ pub fn get_cl_devices() -> Result<OclDeviceList, Error> {
     Ok(list)
 }
 
+pub fn get_device_descriptor(d : &ocl::Device) -> String {
+    format!("{} {}", d.vendor().unwrap(), d.name().unwrap())
+}
+
 pub fn print_plat_dev_pair(p : &(ocl::Platform, ocl::Device)) -> Result<(), Error> {
     use ocl::enums::{DeviceInfo, DeviceInfoResult};
     use ocl::flags::{DEVICE_TYPE_CPU, DEVICE_TYPE_GPU, DEVICE_TYPE_ACCELERATOR};
