@@ -1,5 +1,5 @@
 [package]
-name = "miner"
+name = "cpen442-miner"
 version = "0.1.0"
 authors = ["Jack Guo <jackguo380@gmail.com>"]
 edition = "2018"

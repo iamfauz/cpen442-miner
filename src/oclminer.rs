@@ -190,6 +190,7 @@ impl MinerFunction for OclMinerFunction {
         let mut wg_multiplier_runtime_ms = 1;
         let mut wg_multiplier = 1;
         let mut wg_multiplier_found_peak = false;
+        let mut wg_found_peak_time = Instant::now();
 
         let queue = ocl::Queue::new(&self.context, self.device.clone(), None)?;
 
@@ -366,14 +367,19 @@ impl MinerFunction for OclMinerFunction {
                     if cur_loop_ms > self.max_loop_ms as u64 {
                         wg_multiplier /= 2;
                         wg_multiplier_found_peak = true;
+                        wg_found_peak_time = Instant::now();
                     } else if hash_rate < last_wg_multiplier_hash_rate {
                         // Increased wg size decreased performance
                         wg_multiplier /= 2;
                         wg_multiplier_found_peak = true;
+                        wg_found_peak_time = Instant::now();
                     } else {
                         // Increased wg size increased performance
                         wg_multiplier *= 2;
                     }
+                } else if wg_found_peak_time.elapsed().as_secs() > 600 {
+                    wg_multiplier *= 2;
+                    wg_multiplier_found_peak = false;
                 }
 
                 last_wg_multiplier_hash_rate = hash_rate;
