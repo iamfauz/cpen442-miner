@@ -13,7 +13,7 @@ while ! timeout 10 curl -X POST --silent http://cpen442coin.ece.ubc.ca/last_coin
     echo "Checking CPEN442 Coin is Working..."
 done
 
-cp -v all_proxies.txt proxy_in.txt
+#cp -v all_proxies.txt proxy_in.txt
 
 opts=(
     --identity 00ed0d3d8577f6c8c654c8c4527ce884
@@ -22,8 +22,8 @@ opts=(
     --cl-max-utilize 0.9
     --ncpu 2
     --poll-ms 8000
-    -o wallet6.txt
-    --proxy-file proxy_in.txt
+    -o wallet.txt
+    #--proxy-file proxy_in.txt
 )
 
-exec ./cpen442-miner "${opts[@]}" "$@"
+exec ./target/release/cpen442-miner "${opts[@]}" "$@"
