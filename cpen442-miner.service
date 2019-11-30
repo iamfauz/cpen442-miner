@@ -1,13 +1,11 @@
 [Unit]
 Description=CPEN 442 Miner
-Documentation=man:boinc(1)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash /home/guoj/Documents/Year-4/CPEN-442/assignment4/miner/runminer.sh
+ExecStart=cpen442-miner --identity 00ed0d3d8577f6c8c654c8c4527ce884 --cl-device 0
 ExecStop=killall cpen442-miner
-WorkingDirectory=/home/guoj/Documents/Year-4/CPEN-442/assignment4/miner
 LimitNOFILE=65536
 
 [Install]
