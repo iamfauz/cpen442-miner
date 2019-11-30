@@ -25,7 +25,7 @@ pub struct OclMinerFunction {
     throttle_of_100 : u32
 }
 
-const DEBUG_ENABLE : usize = 1; // 0 or 1
+const DEBUG_ENABLE : usize = 0; // 0 or 1
 
 const OCL_WORD_LEN : usize = size_of::<u32>();
 const OCL_MESSAGE_LEN : usize = cpen442coin::MD5_BLOCK_LEN * 4;

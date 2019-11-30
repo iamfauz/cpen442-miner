@@ -67,6 +67,7 @@ struct DifficultyResp {
     time_stamp: u64,
 }
 
+const DEFAULT_DIFFICULTY : u64 = 9;
 
 const LAST_COIN_URL : &str = "http://cpen442coin.ece.ubc.ca/last_coin";
 const DIFFICULTY_URL : &str = "http://cpen442coin.ece.ubc.ca/difficulty";
@@ -84,7 +85,7 @@ impl Tracker {
             proxy_manager : Arc::new(ProxyManager::new(proxy_file)?),
             last_coin_thread : None,
             last_coin : Arc::from(Mutex::new("00000000008c70b237c12e2c25d278cc".into())), // Start with a random coin
-            difficulty : Arc::from(Mutex::new(8)),
+            difficulty : Arc::from(Mutex::new(DEFAULT_DIFFICULTY)),
             last_coin_url : LAST_COIN_URL,
             difficulty_url : DIFFICULTY_URL,
             claim_coin_url : CLAIM_COIN_URL,
